@@ -19,7 +19,10 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>{{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- NODE_BIN_DIR covers node/pnpm (nvm installs live outside system paths);
+             /opt/homebrew/bin covers gh on Apple-silicon Macs — launchd jobs get a
+             bare PATH, and the dispatcher shells out to both. -->
+        <string>{{NODE_BIN_DIR}}:/opt/homebrew/bin:{{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key>
         <string>{{HOME}}</string>
     </dict>

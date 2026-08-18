@@ -148,6 +148,7 @@ function installLaunchdPlist(): string {
   const rendered = template
     .replaceAll('{{LABEL}}', label)
     .replaceAll('{{NODE_PATH}}', getNodePath())
+    .replaceAll('{{NODE_BIN_DIR}}', path.dirname(getNodePath()))
     .replaceAll('{{TSX_CLI_PATH}}', path.join(PROJECT_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'))
     .replaceAll('{{DISPATCH_SCRIPT_PATH}}', path.join(PROJECT_ROOT, 'scripts', 'pr-reviewer', 'dispatch.ts'))
     .replaceAll('{{PROJECT_ROOT}}', PROJECT_ROOT)
