@@ -33,6 +33,7 @@ import {
   getThreadReplies,
   hasForeignActivity,
   injectCliEvent,
+  latestSelfReviewState,
   loadConfig,
   loadState,
   parsePrKey,
@@ -286,7 +287,7 @@ async function closeOutPr(
   key: string,
   ref: PrRef,
   known: PrState,
-  reason: 'merged' | 'closed' | 'review-request-removed',
+  reason: 'merged' | 'closed' | 'approved' | 'review-request-removed',
   ctx: TickCtx,
 ): Promise<void> {
   const line =
@@ -294,7 +295,9 @@ async function closeOutPr(
       ? `PR ${ref.owner}/${ref.repo}#${ref.number} was merged. Stopping tracking.`
       : reason === 'closed'
         ? `PR ${ref.owner}/${ref.repo}#${ref.number} was closed without merging. Stopping tracking.`
-        : `Review request for this PR was removed. Stopping tracking.`;
+        : reason === 'approved'
+          ? `Verdict submitted and review request cleared. Stopping tracking.`
+          : `Review request for this PR was removed. Stopping tracking.`;
 
   try {
     await postThreadMessage(ctx.cfg, known.thread_ts, line, ctx.args.dryRun);
@@ -337,8 +340,26 @@ async function processPr(key: string, isDiscovered: boolean, ctx: TickCtx): Prom
     return;
   }
   if (!stillRequested) {
-    await closeOutPr(key, ref, known, 'review-request-removed', ctx);
-    return;
+    // GitHub clears the review request the moment ANY review is submitted —
+    // the agent's own COMMENT reviews included — so a cleared request does
+    // not mean the cycle is over. Close out only once our verdict is in
+    // (APPROVE); after COMMENT or REQUEST_CHANGES the PR stays tracked for
+    // pushes and ping-pong until it merges/closes. A cleared request with
+    // no self review at all means the author genuinely un-requested us.
+    const verdict = latestSelfReviewState(ref.owner, ref.repo, ref.number, ctx.cfg.selfLogin);
+    if (!verdict.ok) {
+      console.error(`[pr-reviewer] ${key}: failed to fetch self reviews: ${verdict.error}`);
+      return; // keep state as-is, retry next tick
+    }
+    if (verdict.state === 'APPROVED') {
+      await closeOutPr(key, ref, known, 'approved', ctx);
+      return;
+    }
+    if (verdict.state === null) {
+      await closeOutPr(key, ref, known, 'review-request-removed', ctx);
+      return;
+    }
+    // COMMENT / REQUEST_CHANGES / DISMISSED — fall through, keep tracking.
   }
   if (pr.draft) return; // became draft mid-review — leave state untouched
 

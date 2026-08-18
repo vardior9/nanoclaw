@@ -243,6 +243,31 @@ export function getPrDetail(owner: string, repo: string, number: number): { ok: 
 }
 
 /**
+ * State of selfLogin's most recent submitted review on the PR, or null when
+ * selfLogin has never reviewed it. Distinguishes "review request cleared
+ * because we submitted a review" (GitHub clears the request on ANY review,
+ * COMMENT included) from "the author genuinely un-requested us".
+ */
+export function latestSelfReviewState(
+  owner: string,
+  repo: string,
+  number: number,
+  selfLogin: string,
+): { ok: true; state: string | null } | { ok: false; error: string } {
+  const res = runGh(['api', `repos/${owner}/${repo}/pulls/${number}/reviews`, '--paginate']);
+  if (!res.ok) return { ok: false, error: res.error };
+  try {
+    const reviews = JSON.parse(res.stdout) as Array<{ user?: { login?: string }; state?: string; submitted_at?: string }>;
+    const mine = reviews
+      .filter((r) => r.user?.login === selfLogin && r.submitted_at)
+      .sort((a, b) => String(a.submitted_at).localeCompare(String(b.submitted_at)));
+    return { ok: true, state: mine.length ? (mine[mine.length - 1].state ?? null) : null };
+  } catch (err) {
+    return { ok: false, error: `unparseable gh response: ${String(err)}` };
+  }
+}
+
+/**
  * Whether the PR saw activity from anyone OTHER than selfLogin since the
  * given timestamp. The reviewer's own review posts (same PAT identity as the
  * owner) advance `updated_at`, so waking the agent on every change would
@@ -432,8 +457,17 @@ interface SlackMessage {
 
 export async function getThreadReplies(cfg: Config, threadTs: string, dryRun: boolean): Promise<SlackMessage[]> {
   if (dryRun) return [];
-  const res = await slackCall(cfg.slackBotToken, 'conversations.replies', { channel: cfg.reviewsChannel, ts: threadTs });
-  return Array.isArray(res.messages) ? (res.messages as SlackMessage[]) : [];
+  // Read methods like conversations.replies reject JSON bodies
+  // (invalid_arguments) — they only take query/form params, so GET.
+  const params = new URLSearchParams({ channel: cfg.reviewsChannel, ts: threadTs });
+  const res = await fetch(`${SLACK_API}/conversations.replies?${params}`, {
+    headers: { Authorization: `Bearer ${cfg.slackBotToken}` },
+  });
+  const json = (await res.json()) as Record<string, unknown>;
+  if (json.ok !== true) {
+    throw new Error(`slack conversations.replies failed: ${String(json.error ?? `HTTP ${res.status}`)}`);
+  }
+  return Array.isArray(json.messages) ? (json.messages as SlackMessage[]) : [];
 }
 
 // ---------------------------------------------------------------------------
