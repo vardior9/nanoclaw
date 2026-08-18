@@ -1,0 +1,485 @@
+/**
+ * scripts/pr-reviewer/lib.ts — shared helpers for dispatch.ts and install.ts.
+ *
+ * No side effects at import time (no socket/DB connections opened here) —
+ * both the dispatcher and the installer import this freely.
+ */
+import { execFileSync } from 'child_process';
+import fs from 'fs';
+import net from 'net';
+import path from 'path';
+
+import { DATA_DIR } from '../../src/config.js';
+import { readEnvFile } from '../../src/env.js';
+
+export const PROJECT_ROOT = process.cwd();
+export const REPOS_ROOT = path.join(PROJECT_ROOT, 'repos');
+export const STATE_DIR = path.join(PROJECT_ROOT, 'data', 'pr-reviewer');
+export const STATE_PATH = path.join(STATE_DIR, 'state.json');
+export const LOCK_PATH = path.join(STATE_DIR, 'dispatch.lock');
+export const STALE_LOCK_MS = 15 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+export interface Config {
+  prSearchQuery: string;
+  reviewsChannel: string; // Slack channel id
+  ownerSlackId: string; // Slack user id (also senderId for injected events)
+  /** GitHub login of the reviewer identity — the PAT user AND the human owner. */
+  selfLogin: string;
+  remindAfterHours: number;
+  maxNudges: number;
+  bootstrapPerTick: number;
+  maxWorktreesPerRepo: number;
+  maxWorktreesTotal: number;
+  slackBotToken: string;
+}
+
+const ENV_KEYS = [
+  'PR_SELF_LOGIN',
+  'PR_SEARCH_QUERY',
+  'PR_REVIEWS_CHANNEL',
+  'PR_OWNER_SLACK_ID',
+  'REMIND_AFTER_HOURS',
+  'MAX_NUDGES',
+  'PR_BOOTSTRAP_PER_TICK',
+  'MAX_WORKTREES_PER_REPO',
+  'MAX_WORKTREES_TOTAL',
+  'SLACK_BOT_TOKEN',
+];
+
+function intOr(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export function loadConfig(): Config {
+  const env = readEnvFile(ENV_KEYS);
+  const slackBotToken = env.SLACK_BOT_TOKEN;
+  if (!slackBotToken) {
+    throw new Error('SLACK_BOT_TOKEN is not set in .env — cannot post to Slack');
+  }
+  return {
+    prSearchQuery: env.PR_SEARCH_QUERY || 'is:pr review-requested:vardior9 org:apiiro state:open',
+    reviewsChannel: env.PR_REVIEWS_CHANNEL || 'C0BR29QUFEG',
+    ownerSlackId: env.PR_OWNER_SLACK_ID || 'U010NV4PV29',
+    selfLogin: env.PR_SELF_LOGIN || 'vardior9',
+    remindAfterHours: intOr(env.REMIND_AFTER_HOURS, 24),
+    maxNudges: intOr(env.MAX_NUDGES, 3),
+    bootstrapPerTick: intOr(env.PR_BOOTSTRAP_PER_TICK, 2),
+    maxWorktreesPerRepo: intOr(env.MAX_WORKTREES_PER_REPO, 6),
+    maxWorktreesTotal: intOr(env.MAX_WORKTREES_TOTAL, 20),
+    slackBotToken,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PR key helpers — "<owner>/<repo>#<n>"
+// ---------------------------------------------------------------------------
+
+export interface PrRef {
+  owner: string;
+  repo: string;
+  number: number;
+}
+
+export function prKey(ref: PrRef): string {
+  return `${ref.owner}/${ref.repo}#${ref.number}`;
+}
+
+export function parsePrKey(key: string): PrRef {
+  const m = /^([^/]+)\/([^#]+)#(\d+)$/.exec(key);
+  if (!m) throw new Error(`invalid PR key: "${key}" (expected <owner>/<repo>#<n>)`);
+  return { owner: m[1], repo: m[2], number: Number(m[3]) };
+}
+
+// ---------------------------------------------------------------------------
+// State file — single writer, atomic write, mkdir-based lock
+// ---------------------------------------------------------------------------
+
+export interface PrState {
+  thread_ts: string;
+  head_sha: string;
+  base_ref: string;
+  opened_at: string;
+  last_nudge_at: string | null;
+  nudges: number;
+  /**
+   * PR's `updated_at` as of the last tick that saw it. Not in the task's
+   * literal state shape, but structurally required to detect "new activity
+   * without a new commit" (the alternative — diffing against `opened_at` —
+   * can't tell "already nudged this update" from "brand new update").
+   */
+  last_seen_updated_at: string;
+}
+
+export type StateFile = Record<string, PrState>;
+
+export function loadState(): StateFile {
+  try {
+    const raw = fs.readFileSync(STATE_PATH, 'utf-8');
+    return JSON.parse(raw) as StateFile;
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e.code !== 'ENOENT') {
+      console.error(`[pr-reviewer] state file unreadable, starting empty: ${String(err)}`);
+    }
+    return {};
+  }
+}
+
+export function saveState(state: StateFile): void {
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  const tmp = `${STATE_PATH}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n');
+  fs.renameSync(tmp, STATE_PATH);
+}
+
+/** mkdir-based lock: atomic across processes, no extra deps. */
+export function acquireLock(): boolean {
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(LOCK_PATH);
+    return true;
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e.code !== 'EEXIST') throw err;
+  }
+  // Lock held — check staleness (a launchd tick that crashed without cleanup).
+  try {
+    const stat = fs.statSync(LOCK_PATH);
+    if (Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
+      console.error('[pr-reviewer] breaking stale lock (older than 15m)');
+      fs.rmSync(LOCK_PATH, { recursive: true, force: true });
+      fs.mkdirSync(LOCK_PATH);
+      return true;
+    }
+  } catch {
+    // lock disappeared between the mkdir failure and the stat — treat as free.
+  }
+  return false;
+}
+
+export function releaseLock(): void {
+  fs.rmSync(LOCK_PATH, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// gh CLI — host's own `gh` auth, never a token from anywhere else
+// ---------------------------------------------------------------------------
+
+interface GhSearchItem {
+  number: number;
+  repository_url: string;
+  title: string;
+  html_url: string;
+  labels?: Array<{ name: string }>;
+  draft?: boolean;
+}
+
+/** Raw fields consumed from `gh api repos/{o}/{r}/pulls/{n}`. */
+export interface PrDetail {
+  number: number;
+  state: 'open' | 'closed';
+  merged: boolean;
+  draft: boolean;
+  title: string;
+  html_url: string;
+  updated_at: string;
+  additions: number;
+  deletions: number;
+  changed_files: number;
+  user: { login: string };
+  head: { sha: string };
+  base: { ref: string };
+  requested_reviewers?: Array<{ login: string }>;
+}
+
+function runGh(args: string[]): { ok: true; stdout: string } | { ok: false; error: string } {
+  try {
+    const stdout = execFileSync('gh', args, { encoding: 'utf-8', maxBuffer: 32 * 1024 * 1024 });
+    return { ok: true, stdout };
+  } catch (err) {
+    const e = err as { stderr?: Buffer | string; message: string };
+    return { ok: false, error: e.stderr ? String(e.stderr).trim() : e.message };
+  }
+}
+
+/** Search for PRs, filtering out anything labeled `apiiro-autofix`. */
+export function searchOpenPRs(query: string): PrRef[] {
+  const res = runGh(['api', '-X', 'GET', 'search/issues', '-f', `q=${query}`, '--paginate', '--jq', '.items[]']);
+  if (!res.ok) throw new Error(`gh search failed: ${res.error}`);
+  const items: GhSearchItem[] = res.stdout
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as GhSearchItem);
+
+  return items
+    .filter((item) => !(item.labels ?? []).some((l) => l.name.toLowerCase() === 'apiiro-autofix'))
+    .map((item) => {
+      // repository_url: "https://api.github.com/repos/<owner>/<repo>"
+      const parts = item.repository_url.split('/');
+      return { owner: parts[parts.length - 2], repo: parts[parts.length - 1], number: item.number };
+    });
+}
+
+export function getPrDetail(owner: string, repo: string, number: number): { ok: true; data: PrDetail } | { ok: false; error: string } {
+  const res = runGh(['api', `repos/${owner}/${repo}/pulls/${number}`]);
+  if (!res.ok) return { ok: false, error: res.error };
+  try {
+    return { ok: true, data: JSON.parse(res.stdout) as PrDetail };
+  } catch (err) {
+    return { ok: false, error: `unparseable gh response: ${String(err)}` };
+  }
+}
+
+/**
+ * Whether the PR saw activity from anyone OTHER than selfLogin since the
+ * given timestamp. The reviewer's own review posts (same PAT identity as the
+ * owner) advance `updated_at`, so waking the agent on every change would
+ * burn one no-op model turn per review the agent itself posts. Comments and
+ * review submissions carry authorship; a sha change is handled separately.
+ */
+export function hasForeignActivity(
+  owner: string,
+  repo: string,
+  number: number,
+  sinceIso: string,
+  selfLogin: string,
+): { ok: true; foreign: boolean } | { ok: false; error: string } {
+  interface Authored {
+    user?: { login?: string } | null;
+    submitted_at?: string;
+  }
+  const foreignIn = (items: Authored[], after?: boolean): boolean =>
+    items.some(
+      (item) =>
+        (!after || (item.submitted_at ?? '') > sinceIso) &&
+        item.user?.login !== undefined &&
+        item.user.login !== selfLogin,
+    );
+
+  const issueComments = runGh(['api', `repos/${owner}/${repo}/issues/${number}/comments?since=${sinceIso}`]);
+  if (!issueComments.ok) return { ok: false, error: issueComments.error };
+  const reviewComments = runGh(['api', `repos/${owner}/${repo}/pulls/${number}/comments?since=${sinceIso}`]);
+  if (!reviewComments.ok) return { ok: false, error: reviewComments.error };
+  // The reviews list has no `since` param — filter on submitted_at client-side.
+  const reviews = runGh(['api', `repos/${owner}/${repo}/pulls/${number}/reviews`]);
+  if (!reviews.ok) return { ok: false, error: reviews.error };
+
+  try {
+    const foreign =
+      foreignIn(JSON.parse(issueComments.stdout) as Authored[]) ||
+      foreignIn(JSON.parse(reviewComments.stdout) as Authored[]) ||
+      foreignIn(JSON.parse(reviews.stdout) as Authored[], true);
+    return { ok: true, foreign };
+  } catch (err) {
+    return { ok: false, error: `unparseable gh response: ${String(err)}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// git — bare clone + per-PR ref fetch + worktree teardown (host side only;
+// the worktree itself is created inside the container by the review agent)
+// ---------------------------------------------------------------------------
+
+export function repoDirName(owner: string, repo: string): string {
+  return `${owner}__${repo}`;
+}
+
+export function repoPaths(owner: string, repo: string): { root: string; bare: string; wtDir: string } {
+  const root = path.join(REPOS_ROOT, repoDirName(owner, repo));
+  return { root, bare: path.join(root, 'git'), wtDir: path.join(root, 'wt') };
+}
+
+function runGit(args: string[]): { ok: true; stdout: string } | { ok: false; error: string } {
+  try {
+    const stdout = execFileSync('git', args, { encoding: 'utf-8', maxBuffer: 32 * 1024 * 1024 });
+    return { ok: true, stdout };
+  } catch (err) {
+    const e = err as { stderr?: Buffer | string; message: string };
+    return { ok: false, error: e.stderr ? String(e.stderr).trim() : e.message };
+  }
+}
+
+/** Idempotent: no-ops if the bare clone already exists. */
+export function ensureBareClone(owner: string, repo: string, dryRun: boolean): { ok: true } | { ok: false; error: string } {
+  const { bare } = repoPaths(owner, repo);
+  if (fs.existsSync(path.join(bare, 'HEAD'))) return { ok: true };
+  if (dryRun) {
+    console.log(`[dry-run] would clone https://github.com/${owner}/${repo}.git bare into ${bare}`);
+    return { ok: true };
+  }
+  fs.mkdirSync(path.dirname(bare), { recursive: true });
+  const res = runGit(['clone', '--bare', `https://github.com/${owner}/${repo}.git`, bare]);
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
+}
+
+export function fetchPrRefs(
+  owner: string,
+  repo: string,
+  number: number,
+  baseRef: string,
+  dryRun: boolean,
+): { ok: true } | { ok: false; error: string } {
+  const { bare } = repoPaths(owner, repo);
+  if (dryRun) {
+    console.log(`[dry-run] would fetch PR #${number} head + base '${baseRef}' into ${bare}`);
+    return { ok: true };
+  }
+  const res = runGit([
+    '-C',
+    bare,
+    'fetch',
+    '--prune',
+    'origin',
+    `+refs/pull/${number}/head:refs/pr/${number}/head`,
+    `+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`,
+  ]);
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
+}
+
+export function removeWorktreeAndPrune(owner: string, repo: string, number: number, dryRun: boolean): void {
+  const { bare, wtDir } = repoPaths(owner, repo);
+  const wtPath = path.join(wtDir, `pr-${number}`);
+  if (dryRun) {
+    console.log(`[dry-run] would remove worktree ${wtPath} and prune`);
+    return;
+  }
+  // Tolerate absence — the container agent may never have created it.
+  runGit(['-C', bare, 'worktree', 'remove', '--force', wtPath]);
+  runGit(['-C', bare, 'worktree', 'prune']);
+  fs.rmSync(wtPath, { recursive: true, force: true });
+}
+
+/** Container-side paths for the kickoff message (mounted read-write at /workspace/extra/repos). */
+export function containerBarePath(owner: string, repo: string): string {
+  return `/workspace/extra/repos/${repoDirName(owner, repo)}/git`;
+}
+
+export function containerWorktreePath(owner: string, repo: string, number: number): string {
+  return `/workspace/extra/repos/${repoDirName(owner, repo)}/wt/pr-${number}`;
+}
+
+// ---------------------------------------------------------------------------
+// Slack Web API — modeled on the open-a2a-room.ts fetch pattern
+// ---------------------------------------------------------------------------
+
+const SLACK_API = 'https://slack.com/api';
+
+async function slackCall(token: string, method: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const res = await fetch(`${SLACK_API}/${method}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify(body),
+  });
+  const json = (await res.json()) as Record<string, unknown>;
+  if (json.ok !== true) {
+    throw new Error(`slack ${method} failed: ${String(json.error ?? `HTTP ${res.status}`)}`);
+  }
+  return json;
+}
+
+let cachedBotUserId: string | null = null;
+
+export async function getBotUserId(cfg: Config): Promise<string> {
+  if (cachedBotUserId) return cachedBotUserId;
+  const auth = await slackCall(cfg.slackBotToken, 'auth.test', {});
+  const userId = typeof auth.user_id === 'string' ? auth.user_id : null;
+  if (!userId) throw new Error('slack auth.test returned no user_id');
+  cachedBotUserId = userId;
+  return userId;
+}
+
+export async function postRootMessage(cfg: Config, text: string, dryRun: boolean): Promise<string> {
+  if (dryRun) {
+    console.log(`[dry-run] would post to #${cfg.reviewsChannel}:\n${text}`);
+    return `dry-run-${Date.now()}`;
+  }
+  const res = await slackCall(cfg.slackBotToken, 'chat.postMessage', { channel: cfg.reviewsChannel, text });
+  const ts = typeof res.ts === 'string' ? res.ts : null;
+  if (!ts) throw new Error('chat.postMessage returned no ts');
+  return ts;
+}
+
+export async function postThreadMessage(cfg: Config, threadTs: string, text: string, dryRun: boolean): Promise<void> {
+  if (dryRun) {
+    console.log(`[dry-run] would post in-thread (${threadTs}) on #${cfg.reviewsChannel}:\n${text}`);
+    return;
+  }
+  await slackCall(cfg.slackBotToken, 'chat.postMessage', { channel: cfg.reviewsChannel, thread_ts: threadTs, text });
+}
+
+interface SlackMessage {
+  ts: string;
+  user?: string;
+  bot_id?: string;
+}
+
+export async function getThreadReplies(cfg: Config, threadTs: string, dryRun: boolean): Promise<SlackMessage[]> {
+  if (dryRun) return [];
+  const res = await slackCall(cfg.slackBotToken, 'conversations.replies', { channel: cfg.reviewsChannel, ts: threadTs });
+  return Array.isArray(res.messages) ? (res.messages as SlackMessage[]) : [];
+}
+
+// ---------------------------------------------------------------------------
+// CLI socket injection — src/channels/cli.ts wire format
+// ---------------------------------------------------------------------------
+
+export interface InjectPayload {
+  text: string;
+  to: { channelType: string; platformId: string; threadId: string | null };
+  senderId: string;
+}
+
+function socketPath(): string {
+  return path.join(DATA_DIR, 'cli.sock');
+}
+
+/**
+ * Write one routed event line to the CLI channel's admin socket
+ * (src/channels/cli.ts). The wire format for an admin-transport injection is:
+ *
+ *   { "text": "...", "to": {"channelType": "slack", "platformId": "slack:<channelId>",
+ *                            "threadId": "<slack ts>"}, "senderId": "slack:<userId>" }
+ *
+ * This is fire-and-forget at the protocol level — routed ("to"-bearing)
+ * lines never get a reply on this connection (only plain chat connections
+ * do), so "success" here only means the socket accepted the write. Whether
+ * routing/access checks passed inside the host is not observable from here.
+ */
+export function injectCliEvent(payload: InjectPayload, dryRun: boolean): Promise<void> {
+  if (dryRun) {
+    console.log(`[dry-run] would inject via cli.sock: ${JSON.stringify(payload)}`);
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(socketPath());
+    let settled = false;
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      reject(err);
+    };
+    const timeout = setTimeout(() => fail(new Error('timed out writing to cli.sock')), 5000);
+    socket.on('error', (err) => fail(err));
+    socket.on('connect', () => {
+      socket.end(JSON.stringify(payload) + '\n');
+    });
+    socket.on('close', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+}

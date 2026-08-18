@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "pr-reviewer",
+  "description": "GitHub PR reviewer for the Apiiro org — one Slack thread per PR, local git worktree investigation, owner-gated verdicts.",
+  "extensions": {
+    "ai.nanoco.nanoclaw": {
+      "agentName": "PR Reviewer"
+    }
+  }
+}

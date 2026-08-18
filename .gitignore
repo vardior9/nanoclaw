@@ -51,3 +51,7 @@ AGENTS.md
 docs/maintainer-guide.md
 docs/drafts/
 forks.md
+
+# pr-reviewer — per-install bare clones + worktrees (data/pr-reviewer/ state
+# is already covered by the data/ rule above)
+repos/
