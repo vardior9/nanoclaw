@@ -44,6 +44,7 @@ import {
   repoPaths,
   saveState,
   searchOpenPRs,
+  slackThreadId,
 } from './lib.js';
 
 interface Args {
@@ -151,7 +152,7 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
     await injectCliEvent(
       {
         text: formatKickoffMessage(owner, repo, pr),
-        to: { channelType: 'slack', platformId: `slack:${ctx.cfg.reviewsChannel}`, threadId: ts },
+        to: { channelType: 'slack', platformId: `slack:${ctx.cfg.reviewsChannel}`, threadId: slackThreadId(ctx.cfg, ts) },
         senderId: `slack:${ctx.cfg.ownerSlackId}`,
       },
       ctx.args.dryRun,
@@ -197,7 +198,7 @@ async function handlePush(key: string, ref: PrRef, pr: PrDetail, known: PrState,
     await injectCliEvent(
       {
         text: formatReReviewMessage(owner, repo, pr),
-        to: { channelType: 'slack', platformId: `slack:${ctx.cfg.reviewsChannel}`, threadId: known.thread_ts },
+        to: { channelType: 'slack', platformId: `slack:${ctx.cfg.reviewsChannel}`, threadId: slackThreadId(ctx.cfg, known.thread_ts) },
         senderId: `slack:${ctx.cfg.ownerSlackId}`,
       },
       ctx.args.dryRun,
@@ -232,7 +233,7 @@ async function handleActivity(key: string, ref: PrRef, pr: PrDetail, known: PrSt
     await injectCliEvent(
       {
         text: formatActivityMessage(ref.owner, ref.repo, pr),
-        to: { channelType: 'slack', platformId: `slack:${ctx.cfg.reviewsChannel}`, threadId: known.thread_ts },
+        to: { channelType: 'slack', platformId: `slack:${ctx.cfg.reviewsChannel}`, threadId: slackThreadId(ctx.cfg, known.thread_ts) },
         senderId: `slack:${ctx.cfg.ownerSlackId}`,
       },
       ctx.args.dryRun,

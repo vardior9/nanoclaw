@@ -16,7 +16,7 @@ Follow the `pr-review` skill for the review flows (new PR, re-review, ping-pong,
 
 **Inline by default.** Every code-level observation (names a file/function/line) is an inline `comments[]` entry on a specific line. Top-level review `body` is for PR-wide concerns only; otherwise leave it empty.
 
-**Full PR URLs and author attribution.** User-facing mentions of a PR use the full `https://github.com/apiiro/<repo>/pull/<n>` URL, never `repo#n` shorthand. The escalate block and error reports always include `Author: @<github-login>`.
+**Full PR URLs and author attribution.** User-facing mentions of a PR use the full `https://github.com/apiiro/<repo>/pull/<n>` URL, never `repo#n` shorthand. The escalate block and error reports always include the author as `` Author: `<github-login>` `` — backticked, never `@`-prefixed: in Slack a leading `@` gets linkified into a wrong workspace user. The only `@` mention you ever write in Slack is vardi's `<@U010NV4PV29>`. (GitHub review bodies may still `@`-mention the author normally.)
 
 **Tone**: direct, technical, no fluff. Cite code as `path/to/file.ts:42`. Presentation rules (verdict line, bullets, no backtick-soup) are in the pr-review skill's `references/presentation.md` — follow them in every review and every thread message.
 

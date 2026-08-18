@@ -58,6 +58,12 @@ function intOr(value: string | undefined, fallback: number): number {
 
 export function loadConfig(): Config {
   const env = readEnvFile(ENV_KEYS);
+  // Process env wins over .env — the runbook's `PR_SEARCH_QUERY=… dispatch.ts`
+  // scoped-rollout override depends on it (readEnvFile only reads the file).
+  for (const key of ENV_KEYS) {
+    const fromProcess = process.env[key];
+    if (fromProcess !== undefined) env[key] = fromProcess;
+  }
   const slackBotToken = env.SLACK_BOT_TOKEN;
   if (!slackBotToken) {
     throw new Error('SLACK_BOT_TOKEN is not set in .env — cannot post to Slack');
@@ -440,6 +446,17 @@ export interface InjectPayload {
   senderId: string;
 }
 
+/**
+ * Slack-adapter thread id for a message ts in the reviews channel. The
+ * adapter's thread ids are the composite `slack:<channelId>:<ts>` — this is
+ * both what delivery decodes on the way out and what real in-thread Slack
+ * replies carry on the way in, so injected sessions must be keyed by it (a
+ * bare ts creates a session no Slack reply can ever reach).
+ */
+export function slackThreadId(cfg: Config, ts: string): string {
+  return `slack:${cfg.reviewsChannel}:${ts}`;
+}
+
 function socketPath(): string {
   return path.join(DATA_DIR, 'cli.sock');
 }
@@ -449,7 +466,7 @@ function socketPath(): string {
  * (src/channels/cli.ts). The wire format for an admin-transport injection is:
  *
  *   { "text": "...", "to": {"channelType": "slack", "platformId": "slack:<channelId>",
- *                            "threadId": "<slack ts>"}, "senderId": "slack:<userId>" }
+ *                            "threadId": "slack:<channelId>:<ts>"}, "senderId": "slack:<userId>" }
  *
  * This is fire-and-forget at the protocol level — routed ("to"-bearing)
  * lines never get a reply on this connection (only plain chat connections
