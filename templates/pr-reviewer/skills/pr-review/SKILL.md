@@ -51,10 +51,10 @@ Triggered by a message reporting new comments without a push.
 Post in-thread:
 
 ```
-🔔 Ready for final verdict
+<@U010NV4PV29> 🔔 Ready for final verdict
 <title>
 <full url>
-Author: @<author>
+Author: `<author>`
 
 Recommendation: APPROVE | REQUEST_CHANGES
 
@@ -62,8 +62,6 @@ Why: <one short paragraph>
 
 Open threads: <bullets, or "none">
 Diff: <files> files, +<additions>/−<deletions>
-
-Reply 'approve' or 'request changes' (optional note), 'hold' to wait.
 ```
 
 ## Verdict
