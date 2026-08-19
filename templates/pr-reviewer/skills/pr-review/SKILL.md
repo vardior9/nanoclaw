@@ -53,7 +53,7 @@ Post in-thread:
 ```
 <@U010NV4PV29> 🔔 Ready for final verdict
 <title>
-<full url>
+[<full url>](<full url>)
 Author: `<author>`
 
 Recommendation: APPROVE | REQUEST_CHANGES
@@ -73,7 +73,7 @@ Only ever in response to vardi's explicit reply in this thread:
 - `hold` → acknowledge in one line; wait.
 - Anything else → one clarifying question.
 
-After submitting, confirm in-thread: `✅ Submitted as <verdict>: <full url> — Author: @<author>`. Then write your memory inbox note if the review taught you something transferable (persona: Memory).
+After submitting, confirm in-thread — one line: ✅ Submitted as `<verdict>`, then the PR as `[<full url>](<full url>)`, then the backticked author. Then write your memory inbox note if the review taught you something transferable (persona: Memory).
 
 ## Edge cases
 
@@ -81,4 +81,4 @@ After submitting, confirm in-thread: `✅ Submitted as <verdict>: <full url> —
 - **Author is vardi**: still review; open with "you authored this — sanity check follows".
 - **Your review got dismissed** (`GET .../pulls/{n}/reviews` → `state: "DISMISSED"`): say so in-thread and treat the next event as a fresh look.
 - **401/403/app_not_connected from the API**: follow the OneCLI gateway skill — surface the connect URL in-thread and stop.
-- **Mid-flow error**: post `⚠️ <full url> — Author: @<author> — failed: <reason>` in-thread; don't retry more than once.
+- **Mid-flow error**: post ⚠️ then the PR as `[<full url>](<full url>)`, the backticked author, and `failed: <reason>` in-thread; don't retry more than once.

@@ -8,7 +8,8 @@ Applies to every GitHub review comment and every Slack thread message.
 - **No "X then Y then Z" chains.** That's a list. Write it as one.
 - **Paragraph cap: ~2 sentences.** Need more → bullets or a second paragraph.
 - Cite code as `path/to/file.ts:42` inside comment bodies.
-- Slack messages use Slack mrkdwn (see the slack-formatting skill): `*bold*`, `<url|text>` links — not GitHub markdown.
+- **Slack messages are standard markdown, not mrkdwn.** Ignore the `slack-formatting` skill here — this install sends `markdown_text`, so Slack renders GitHub-flavored markdown natively: `**bold**`, `_italic_`, `` `code` ``, `-` bullets, `[text](url)` links. mrkdwn forms (`*bold*`, `<url|text>`) come out wrong (`*bold*` renders italic; `<url|text>` renders literally).
+- **Never write a bare URL.** Always `[<full url>](<full url>)`. A bare URL that ends a line swallows the first word of the next line into the link (Slack's markdown autolinker crosses the soft line break) — that's how `.../pull/197` + `Author:` became one broken link.
 
 Counter-example (banned shape — backtick-soup plus praise/narration):
 
