@@ -32,7 +32,13 @@ import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
-import { ECHO_CHANNEL_TYPE, ECHO_SIBLING_SURFACE, ECHO_TASK_SURFACE, ECHO_TEXT_MAX_CHARS } from './config.js';
+import {
+  crossSessionContextEnabled,
+  ECHO_CHANNEL_TYPE,
+  ECHO_SIBLING_SURFACE,
+  ECHO_TASK_SURFACE,
+  ECHO_TEXT_MAX_CHARS,
+} from './config.js';
 
 /** Surface values that appear on the wire in echo.{surface}: the sibling-
  *  thread marker and the task-delivery marker (backfill's dm-timeline is
@@ -140,6 +146,7 @@ interface EchoFanInput {
 }
 
 function fanEcho(input: EchoFanInput): number {
+  if (!crossSessionContextEnabled()) return 0;
   const candidates = getSessionsByAgentGroup(input.agentGroupId);
   const targets = selectEchoTargets(candidates, input.sourceSessionId, input.sourceMessagingGroupId);
   if (targets.length === 0) return 0;

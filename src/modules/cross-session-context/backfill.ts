@@ -20,7 +20,12 @@ import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { inboundDbPath, openOutboundDb, withInboundDb, writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
-import { ECHO_CHANNEL_TIMELINE_SURFACE, ECHO_CHANNEL_TYPE, ECHO_TIMELINE_SURFACE } from './config.js';
+import {
+  crossSessionContextEnabled,
+  ECHO_CHANNEL_TIMELINE_SURFACE,
+  ECHO_CHANNEL_TYPE,
+  ECHO_TIMELINE_SURFACE,
+} from './config.js';
 import { truncateEchoText } from './fan.js';
 
 export const BACKFILL_LIMIT = 12;
@@ -121,6 +126,7 @@ function collectSiblingTopLevel(agentGroup: AgentGroup, sessionId: string, limit
  */
 export function backfillNewSession(agentGroup: AgentGroup, session: Session, mg: MessagingGroup): void {
   try {
+    if (!crossSessionContextEnabled()) return;
     if (session.thread_id !== null && isTaskThread(session.thread_id)) return;
 
     const siblings = getSessionsByAgentGroup(agentGroup.id).filter(

@@ -6,6 +6,8 @@
  * source of truth.
  */
 
+import { readEnvFile } from '../../env.js';
+
 /** channel_type stamped on fanned rows (cross-stream contract — the
  *  container formatter renders these as <cross-session-context> blocks). */
 export const ECHO_CHANNEL_TYPE = 'session-echo';
@@ -41,3 +43,28 @@ export const ECHO_TIMELINE_SURFACE = 'dm-timeline';
  *  per-thread too, so a new thread session is seeded with the channel's
  *  top-level timeline — same messaging group means the same audience. */
 export const ECHO_CHANNEL_TIMELINE_SURFACE = 'channel-timeline';
+
+/**
+ * Master switch for BOTH halves of this module (live fan + new-session
+ * backfill), read once from `.env` at startup.
+ *
+ * On by default. Installs where every conversation is an independent work
+ * item set `CROSS_SESSION_CONTEXT=off`: the PR reviewer runs one thread — one
+ * session — per pull request, and a fresh session must start blind. With the
+ * fan on, a new PR session is born holding up to BACKFILL_LIMIT sibling PR
+ * kickoffs as ambient context; live hit (2026-08-19, apiiro/lim#48655) was a
+ * session that woke to 12 other PRs' "New PR ready for review" preludes and
+ * answered "I'm sorry, but I couldn't complete the review in this run."
+ * A persona rule telling the agent to ignore echo blocks is not enough —
+ * the context is already spent by the time it reads it.
+ */
+let cachedEnabled: boolean | undefined;
+export function crossSessionContextEnabled(): boolean {
+  if (cachedEnabled === undefined) {
+    // process.env wins so a single run (or the unit-test env, which exercises
+    // the feature on) can override the install-wide `.env` setting.
+    const raw = process.env.CROSS_SESSION_CONTEXT ?? readEnvFile(['CROSS_SESSION_CONTEXT']).CROSS_SESSION_CONTEXT ?? '';
+    cachedEnabled = raw.trim().toLowerCase() !== 'off';
+  }
+  return cachedEnabled;
+}
