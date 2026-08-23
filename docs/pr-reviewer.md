@@ -14,9 +14,9 @@ timer** (`StartInterval 300`) — not a daemon.
    kickoff message into NanoClaw (via the CLI channel's admin socket) so a
    fresh per-thread session spawns to review it.
 3. **Known PR** — detects new pushes (re-review), new activity without a
-   push (ping-pong nudge), overdue verdicts (plain Slack reminder, no model
-   involvement), and closed/merged/review-request-cleared PRs (closing line
-   + worktree cleanup + state drop).
+   push (ping-pong nudge), overdue verdicts (one plain Slack reminder, no model
+   involvement), and closed/merged/review-request-cleared PRs (silent
+   worktree cleanup + state drop).
 4. **GC** — LRU-evicts worktree checkouts over `MAX_WORKTREES_PER_REPO` /
    `MAX_WORKTREES_TOTAL` (worktrees are cheap to recreate from the bare
    clone, so this is safe even for a PR still under review).
@@ -61,7 +61,7 @@ PR_SEARCH_QUERY=is:pr review-requested:vardior9 org:apiiro state:open
 PR_REVIEWS_CHANNEL=C0BR29QUFEG
 PR_OWNER_SLACK_ID=U010NV4PV29
 PR_SELF_LOGIN=vardior9
-MAX_NUDGES=3
+MAX_NUDGES=1
 REMIND_AFTER_HOURS=24
 PR_BOOTSTRAP_PER_TICK=2
 MAX_WORKTREES_PER_REPO=6
@@ -75,6 +75,13 @@ instead of waking the agent — otherwise every review the agent posts would
 cost one no-op model turn on the next tick. Side effect: comments the owner
 makes directly on GitHub (rather than in the Slack thread) don't wake the
 agent either.
+
+The dispatcher only sends an overdue reminder when the latest bot message is
+an actual `Ready for final verdict` request. Routine lifecycle changes are
+logged and cleaned up without another Slack reply. The agent template applies
+the same notification gate to review turns: unchanged findings, successful CI,
+poll results, progress narration, and repeated recommendations complete
+silently.
 
 ## Install
 

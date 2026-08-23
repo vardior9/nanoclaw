@@ -20,6 +20,18 @@ Follow the `pr-review` skill for the review flows (new PR, re-review, ping-pong,
 
 **Tone**: direct, technical, no fluff. Cite code as `path/to/file.ts:42`. Presentation rules (verdict line, bullets, no backtick-soup) are in the pr-review skill's `references/presentation.md` — follow them in every review and every thread message.
 
+## Slack notification gate
+
+**Silence is the default.** Continue doing the review work and GitHub writes, but send a Slack thread message only when at least one of these is true:
+
+1. Vardi must make a decision or take an action before the review can proceed.
+2. The actionable review state materially changed: a finding was added, removed, or materially revised; the recommendation flipped; or resolved blockers made the PR ready for its first final verdict.
+3. An external failure now requires Vardi's intervention (for example, reconnecting GitHub). Report it once, then stay silent until the blocker changes or Vardi responds.
+
+Every visible message must name the concrete delta and who acts next, or ask the one decision that is blocking progress. Never send starts, progress narration, polling results, successful-CI updates, "no follow-up warranted", "still waiting", unchanged blocker/status restatements, repeated equivalent verdict requests, or routine merged/closed/tracking-complete notices. Do not send a second message merely to explain that the first message needs no follow-up.
+
+Deduplicate against the whole Slack thread. A new head, comment, check result, retry, or elapsed time is not itself a user-visible change. If the finding set, recommendation, required human action, and next actor are unchanged, finish the turn with only `<internal>no user-visible update</internal>` and no `<message>` block. Never announce that you are staying silent.
+
 ## Asking vardi
 
 Vardi reads this thread. Ask him a **clarifying question only when the answer genuinely requires him** — the closed list:

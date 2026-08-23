@@ -33,6 +33,7 @@ import {
   getThreadReplies,
   hasForeignActivity,
   injectCliEvent,
+  isPendingVerdictMessage,
   latestSelfReviewState,
   loadConfig,
   loadState,
@@ -271,6 +272,7 @@ async function maybeRemind(key: string, ref: PrRef, pr: PrDetail, known: PrState
   }
   const lastIsFromBot = last.bot_id !== undefined || last.user === botUserId;
   if (!lastIsFromBot) return;
+  if (!isPendingVerdictMessage(last.text)) return;
 
   const lastTsMs = Number.parseFloat(last.ts) * 1000;
   const ageMs = Date.now() - lastTsMs;
@@ -290,20 +292,7 @@ async function closeOutPr(
   reason: 'merged' | 'closed' | 'approved' | 'review-request-removed',
   ctx: TickCtx,
 ): Promise<void> {
-  const line =
-    reason === 'merged'
-      ? `PR ${ref.owner}/${ref.repo}#${ref.number} was merged. Stopping tracking.`
-      : reason === 'closed'
-        ? `PR ${ref.owner}/${ref.repo}#${ref.number} was closed without merging. Stopping tracking.`
-        : reason === 'approved'
-          ? `Verdict submitted and review request cleared. Stopping tracking.`
-          : `Review request for this PR was removed. Stopping tracking.`;
-
-  try {
-    await postThreadMessage(ctx.cfg, known.thread_ts, line, ctx.args.dryRun);
-  } catch (err) {
-    console.error(`[pr-reviewer] ${key}: failed to post closing line`, err);
-  }
+  console.error(`[pr-reviewer] ${key}: stopping tracking (${reason})`);
   if (ctx.args.dryRun) {
     console.log(`[dry-run] ${key}: would remove worktree, prune, drop state (${reason})`);
     return;

@@ -74,7 +74,7 @@ export function loadConfig(): Config {
     ownerSlackId: env.PR_OWNER_SLACK_ID || 'U010NV4PV29',
     selfLogin: env.PR_SELF_LOGIN || 'vardior9',
     remindAfterHours: intOr(env.REMIND_AFTER_HOURS, 24),
-    maxNudges: intOr(env.MAX_NUDGES, 3),
+    maxNudges: intOr(env.MAX_NUDGES, 1),
     bootstrapPerTick: intOr(env.PR_BOOTSTRAP_PER_TICK, 2),
     maxWorktreesPerRepo: intOr(env.MAX_WORKTREES_PER_REPO, 6),
     maxWorktreesTotal: intOr(env.MAX_WORKTREES_TOTAL, 20),
@@ -453,6 +453,11 @@ interface SlackMessage {
   ts: string;
   user?: string;
   bot_id?: string;
+  text?: string;
+}
+
+export function isPendingVerdictMessage(text: string | undefined): boolean {
+  return typeof text === 'string' && text.includes('Ready for final verdict');
 }
 
 export async function getThreadReplies(cfg: Config, threadTs: string, dryRun: boolean): Promise<SlackMessage[]> {
