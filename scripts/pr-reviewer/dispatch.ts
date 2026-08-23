@@ -54,6 +54,11 @@ interface Args {
   once: string | null;
 }
 
+const SLACK_NOTIFICATION_GATE =
+  'Slack is silent by default. Do the review and GitHub writes without a Slack reply. ' +
+  'Send Slack only if Vardi personally must decide or act before you can proceed, or the PR is ready for its single final-verdict request. ' +
+  'Findings and finding changes are GitHub-only.';
+
 function parseArgs(argv: string[]): Args {
   let dryRun = false;
   let once: string | null = null;
@@ -97,6 +102,7 @@ function formatKickoffMessage(owner: string, repo: string, pr: PrDetail): string
     '',
     'This is a fresh session with no other context. Follow your pr-review skill to check out ' +
       'the PR (creating the worktree above from the bare clone if it does not exist yet) and review it.',
+    SLACK_NOTIFICATION_GATE,
   ].join('\n');
 }
 
@@ -104,11 +110,15 @@ function formatReReviewMessage(owner: string, repo: string, pr: PrDetail): strin
   return [
     `New commits pushed to ${owner}/${repo}#${pr.number} — head is now ${pr.head.sha}.`,
     `Re-fetch into the existing worktree at ${containerWorktreePath(owner, repo, pr.number)} (bare clone: ${containerBarePath(owner, repo)}) and re-review.`,
+    SLACK_NOTIFICATION_GATE,
   ].join('\n');
 }
 
 function formatActivityMessage(owner: string, repo: string, pr: PrDetail): string {
-  return `New activity on ${owner}/${repo}#${pr.number} (comments/reviews, no new commits). Please check in and respond if a follow-up is warranted.`;
+  return [
+    `New activity on ${owner}/${repo}#${pr.number} (comments/reviews, no new commits). Check whether a GitHub follow-up is warranted.`,
+    SLACK_NOTIFICATION_GATE,
+  ].join('\n');
 }
 
 /**

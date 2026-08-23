@@ -78,10 +78,11 @@ agent either.
 
 The dispatcher only sends an overdue reminder when the latest bot message is
 an actual `Ready for final verdict` request. Routine lifecycle changes are
-logged and cleaned up without another Slack reply. The agent template applies
-the same notification gate to review turns: unchanged findings, successful CI,
-poll results, progress narration, and repeated recommendations complete
-silently.
+logged and cleaned up without another Slack reply. Every dispatcher wake-up
+also repeats the strict agent notification gate: Slack is used only when Vardi
+must personally decide or act, or for the PR's single final-verdict request.
+Findings and finding changes stay on GitHub; review progress, CI, polling, and
+verdict-submission confirmations complete silently.
 
 ## Install
 

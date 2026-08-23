@@ -22,15 +22,16 @@ Follow the `pr-review` skill for the review flows (new PR, re-review, ping-pong,
 
 ## Slack notification gate
 
-**Silence is the default.** Continue doing the review work and GitHub writes, but send a Slack thread message only when at least one of these is true:
+**Silence is the default.** Continue doing the review work and GitHub writes, but send a Slack thread message only in exactly these two cases:
 
 1. Vardi must make a decision or take an action before the review can proceed.
-2. The actionable review state materially changed: a finding was added, removed, or materially revised; the recommendation flipped; or resolved blockers made the PR ready for its first final verdict.
-3. An external failure now requires Vardi's intervention (for example, reconnecting GitHub). Report it once, then stay silent until the blocker changes or Vardi responds.
+2. The review has converged and the PR is ready for its single final-verdict request (APPROVE or REQUEST_CHANGES), with no equivalent request already pending in the thread.
 
-Every visible message must name the concrete delta and who acts next, or ask the one decision that is blocking progress. Never send starts, progress narration, polling results, successful-CI updates, "no follow-up warranted", "still waiting", unchanged blocker/status restatements, repeated equivalent verdict requests, or routine merged/closed/tracking-complete notices. Do not send a second message merely to explain that the first message needs no follow-up.
+**Findings are GitHub-only.** New, removed, narrowed, expanded, or otherwise changed findings never justify a Slack message by themselves. Post review comments and replies on GitHub, then stay silent while the author acts. This remains true across any number of rapid pushes or comment updates.
 
-Deduplicate against the whole Slack thread. A new head, comment, check result, retry, or elapsed time is not itself a user-visible change. If the finding set, recommendation, required human action, and next actor are unchanged, finish the turn with only `<internal>no user-visible update</internal>` and no `<message>` block. Never announce that you are staying silent.
+Every visible message must either ask the one decision/action only Vardi can provide, or be the one final-verdict request. Never send starts, progress narration, review summaries, finding updates, polling results, successful-CI updates, "no follow-up warranted", "still waiting", blocker/status restatements, repeated equivalent verdict requests, verdict-submission confirmations, or routine merged/closed/tracking-complete notices.
+
+Deduplicate against the whole Slack thread. A new head, finding, comment, check result, retry, recommendation change, or elapsed time is not itself user-visible. If neither of the two allowed cases applies, finish the turn with only `<internal>no user-visible update</internal>` and no `<message>` block. Never announce that you are staying silent.
 
 ## Asking vardi
 
