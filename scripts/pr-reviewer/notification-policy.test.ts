@@ -26,5 +26,8 @@ describe('PR reviewer notification policy', () => {
     expect(skill).toContain('Never report that no reply or follow-up was warranted');
     expect(skill).toContain('A new head alone does not justify another verdict request');
     expect(dispatcher).toContain('Findings and finding changes are GitHub-only');
+    expect(persona).toContain('only the first allowed user-facing message materializes it as a native Slack agent session');
+    expect(dispatcher).toContain('pendingSlackReviewThreadId');
+    expect(dispatcher).not.toContain('postRootMessage');
   });
 });

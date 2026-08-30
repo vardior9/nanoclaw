@@ -121,6 +121,14 @@ export function createChannelDeliveryAdapter(): ChannelDeliveryAdapter {
       const adapter = getChannelAdapterExact(instance ?? channelType);
       await adapter?.setTyping?.(platformId, threadId, status, statusKind);
     },
+    async setAgentSessionStatus(channelType, platformId, threadId, status, instance, options): Promise<void> {
+      const adapter = getChannelAdapterExact(instance ?? channelType);
+      if (!adapter) throw new MissingChannelAdapterError(channelType, instance);
+      if (!adapter.setAgentSessionStatus) {
+        throw new Error(`Adapter '${instance ?? channelType}' does not support native agent sessions`);
+      }
+      await adapter.setAgentSessionStatus(platformId, threadId, status, options);
+    },
   };
 }
 

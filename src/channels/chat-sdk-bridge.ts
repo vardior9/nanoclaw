@@ -37,6 +37,15 @@ interface GatewayAdapter extends Adapter {
   ): Promise<Response>;
 }
 
+interface NativeAgentSessionAdapter extends GatewayAdapter {
+  setAgentSessionStatus?(
+    channelId: string,
+    threadTs: string,
+    status: 'active' | 'processing' | 'suspended' | 'closed',
+    options?: { title?: string; initiatorUserId?: string },
+  ): Promise<void>;
+}
+
 /** Reply context extracted from a platform's raw message. */
 export interface ReplyContext {
   text: string;
@@ -55,10 +64,29 @@ export interface AgentDmOpenedEvent {
   channelId: string;
 }
 
+export interface AgentSessionStoppedEvent {
+  instance: string;
+  channelId: string;
+  threadTs: string;
+  userId: string;
+}
+
 let agentDmOpenedHandler: ((event: AgentDmOpenedEvent) => void | Promise<void>) | null = null;
+let agentSessionStoppedHandler: ((event: AgentSessionStoppedEvent) => void | Promise<void>) | null = null;
 
 export function setAgentDmOpenedHandler(fn: (event: AgentDmOpenedEvent) => void | Promise<void>): void {
   agentDmOpenedHandler = fn;
+}
+
+export function setAgentSessionStoppedHandler(fn: (event: AgentSessionStoppedEvent) => void | Promise<void>): void {
+  agentSessionStoppedHandler = fn;
+}
+
+export function dispatchAgentSessionStopped(event: AgentSessionStoppedEvent): void {
+  if (!agentSessionStoppedHandler) return;
+  Promise.resolve(agentSessionStoppedHandler(event)).catch((err) =>
+    log.warn('Agent-session stopped handler failed', { channelId: event.channelId, threadTs: event.threadTs, err }),
+  );
 }
 
 function dispatchAgentDmOpened(event: AgentDmOpenedEvent): void {
@@ -119,8 +147,13 @@ export function appContextEntities(
       .map((e) => {
         const entity = e as Record<string, unknown> | null;
         const type = typeof entity?.type === 'string' ? entity.type : '';
-        const idValue = entity?.id ?? entity?.channel_id ?? entity?.entity_id;
-        const id = typeof idValue === 'string' ? idValue : '';
+        const idValue = entity?.id ?? entity?.channel_id ?? entity?.entity_id ?? entity?.value;
+        const id =
+          typeof idValue === 'string'
+            ? idValue
+            : idValue && typeof idValue === 'object'
+              ? `${String((idValue as Record<string, unknown>).channel_id ?? '')}:${String((idValue as Record<string, unknown>).message_ts ?? '')}`
+              : '';
         return { type, id };
       })
       .filter((e) => e.type !== '' && e.id !== '');
@@ -441,6 +474,40 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   let state: SqliteStateAdapter;
   let setupConfig: ChannelSetup;
   let gatewayAbort: AbortController | null = null;
+  const nativeAgentStatuses = new Map<string, 'active' | 'processing' | 'suspended' | 'closed'>();
+  const nativeAgentIdleTimers = new Map<string, NodeJS.Timeout>();
+
+  const nativeSessionKey = (channelId: string, threadTs: string): string => `${instanceKey}:${channelId}:${threadTs}`;
+  const clearNativeIdleTimer = (key: string): void => {
+    const timer = nativeAgentIdleTimers.get(key);
+    if (timer) clearTimeout(timer);
+    nativeAgentIdleTimers.delete(key);
+  };
+
+  async function markNativeSessionProcessing(
+    native: NativeAgentSessionAdapter,
+    channelId: string,
+    threadTs: string,
+  ): Promise<void> {
+    const key = nativeSessionKey(channelId, threadTs);
+    clearNativeIdleTimer(key);
+    if (nativeAgentStatuses.get(key) !== 'processing') {
+      await native.setAgentSessionStatus!(channelId, threadTs, 'processing');
+      nativeAgentStatuses.set(key, 'processing');
+    }
+    // Typing refreshes arrive every four seconds while work is live. Once
+    // they stop, clear a processing-only session that produced no visible
+    // output; an explicit suspended/closed transition cancels this timer.
+    const timer = setTimeout(() => {
+      nativeAgentIdleTimers.delete(key);
+      if (nativeAgentStatuses.get(key) !== 'processing') return;
+      Promise.resolve(native.setAgentSessionStatus!(channelId, threadTs, 'active'))
+        .then(() => nativeAgentStatuses.set(key, 'active'))
+        .catch((err) => log.warn('Failed to clear idle native agent-session status', { channelId, threadTs, err }));
+    }, 12_000);
+    timer.unref();
+    nativeAgentIdleTimers.set(key, timer);
+  }
 
   async function messageToInbound(
     message: ChatMessage,
@@ -481,6 +548,19 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const replyTo = config.extractReplyContext(message.raw as Record<string, any>);
       if (replyTo) serialized.replyTo = replyTo;
+    }
+
+    // Slack agent view attaches the user's current app context directly to
+    // message.im. Chat SDK 4.29 keeps it only in raw, so project the ordered
+    // entities before raw is intentionally discarded below.
+    if (message.raw) {
+      const raw = message.raw as Record<string, unknown>;
+      const appContext = raw.app_context as { entities?: unknown[] } | undefined;
+      if (Array.isArray(appContext?.entities)) {
+        serialized.app_context = {
+          entities: appContextEntities({ entities: appContext.entities } as unknown as AssistantContextChangedEvent),
+        };
+      }
     }
 
     // Project chat-sdk's nested author into the flat sender fields the router
@@ -908,12 +988,39 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     },
 
     async setTyping(platformId: string, threadId: string | null) {
+      // Synthetic reviewer threads intentionally do not exist in Slack yet:
+      // background review must not create a session or a notification.
+      if (threadId?.includes(':pending-pr-')) return;
+      const native = adapter as NativeAgentSessionAdapter;
+      if (native.setAgentSessionStatus && platformId.startsWith('slack:D') && threadId) {
+        const channelId = platformId.replace(/^slack:/, '').split(':')[0];
+        const threadTs = threadId.split(':').at(-1);
+        if (channelId && threadTs) {
+          await markNativeSessionProcessing(native, channelId, threadTs);
+          return;
+        }
+      }
       const tid = threadId ?? platformId;
       await adapter.startTyping(tid);
     },
 
+    async setAgentSessionStatus(platformId, threadId, status, options) {
+      const native = adapter as NativeAgentSessionAdapter;
+      if (!native.setAgentSessionStatus) throw new Error(`${adapter.name} has no native agent-session API`);
+      const channelId = platformId.replace(/^slack:/, '').split(':')[0];
+      const threadTs = threadId.split(':').at(-1);
+      if (!channelId || !threadTs) throw new Error(`Invalid agent-session address: ${platformId}/${threadId}`);
+      const key = nativeSessionKey(channelId, threadTs);
+      clearNativeIdleTimer(key);
+      await native.setAgentSessionStatus(channelId, threadTs, status, options);
+      nativeAgentStatuses.set(key, status);
+    },
+
     async teardown() {
       gatewayAbort?.abort();
+      for (const timer of nativeAgentIdleTimers.values()) clearTimeout(timer);
+      nativeAgentIdleTimers.clear();
+      nativeAgentStatuses.clear();
       await chat.shutdown();
       log.info('Chat SDK bridge shut down', { adapter: adapter.name });
     },

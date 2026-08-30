@@ -9,6 +9,8 @@ import fs from 'fs';
 import net from 'net';
 import path from 'path';
 
+import Database from 'better-sqlite3';
+
 import { DATA_DIR } from '../../src/config.js';
 import { readEnvFile } from '../../src/env.js';
 
@@ -26,6 +28,7 @@ export const STALE_LOCK_MS = 15 * 60 * 1000;
 export interface Config {
   prSearchQuery: string;
   reviewsChannel: string; // Slack channel id
+  reviewsDm: string; // Slack DM channel id used by the native Agent view
   ownerSlackId: string; // Slack user id (also senderId for injected events)
   /** GitHub login of the reviewer identity — the PAT user AND the human owner. */
   selfLogin: string;
@@ -41,6 +44,7 @@ const ENV_KEYS = [
   'PR_SELF_LOGIN',
   'PR_SEARCH_QUERY',
   'PR_REVIEWS_CHANNEL',
+  'PR_REVIEWS_DM',
   'PR_OWNER_SLACK_ID',
   'REMIND_AFTER_HOURS',
   'MAX_NUDGES',
@@ -71,6 +75,7 @@ export function loadConfig(): Config {
   return {
     prSearchQuery: env.PR_SEARCH_QUERY || 'is:pr review-requested:vardior9 org:apiiro state:open',
     reviewsChannel: env.PR_REVIEWS_CHANNEL || 'C0BR29QUFEG',
+    reviewsDm: env.PR_REVIEWS_DM || 'D0B5RV4BH37',
     ownerSlackId: env.PR_OWNER_SLACK_ID || 'U010NV4PV29',
     selfLogin: env.PR_SELF_LOGIN || 'vardior9',
     remindAfterHours: intOr(env.REMIND_AFTER_HOURS, 24),
@@ -449,6 +454,20 @@ export async function postThreadMessage(cfg: Config, threadTs: string, text: str
   await slackCall(cfg.slackBotToken, 'chat.postMessage', { channel: cfg.reviewsChannel, thread_ts: threadTs, text });
 }
 
+export async function postSlackThreadMessage(
+  cfg: Config,
+  channelId: string,
+  threadTs: string,
+  text: string,
+  dryRun: boolean,
+): Promise<void> {
+  if (dryRun) {
+    console.log(`[dry-run] would post in Slack thread ${channelId}/${threadTs}:\n${text}`);
+    return;
+  }
+  await slackCall(cfg.slackBotToken, 'chat.postMessage', { channel: channelId, thread_ts: threadTs, text });
+}
+
 interface SlackMessage {
   ts: string;
   user?: string;
@@ -473,6 +492,105 @@ export async function getThreadReplies(cfg: Config, threadTs: string, dryRun: bo
     throw new Error(`slack conversations.replies failed: ${String(json.error ?? `HTTP ${res.status}`)}`);
   }
   return Array.isArray(json.messages) ? (json.messages as SlackMessage[]) : [];
+}
+
+export async function getSlackThreadReplies(
+  cfg: Config,
+  channelId: string,
+  threadTs: string,
+  dryRun: boolean,
+): Promise<SlackMessage[]> {
+  if (dryRun) return [];
+  const params = new URLSearchParams({ channel: channelId, ts: threadTs });
+  const res = await fetch(`${SLACK_API}/conversations.replies?${params}`, {
+    headers: { Authorization: `Bearer ${cfg.slackBotToken}` },
+  });
+  const json = (await res.json()) as Record<string, unknown>;
+  if (json.ok !== true) {
+    throw new Error(`slack conversations.replies failed: ${String(json.error ?? `HTTP ${res.status}`)}`);
+  }
+  return Array.isArray(json.messages) ? (json.messages as SlackMessage[]) : [];
+}
+
+export function pendingSlackReviewThreadId(cfg: Config, key: string): string {
+  return `slack:${cfg.reviewsDm}:pending-pr-${Buffer.from(key, 'utf8').toString('base64url')}`;
+}
+
+export function reviewDestination(cfg: Config, storedThread: string): InjectPayload['to'] {
+  if (storedThread.startsWith(`slack:${cfg.reviewsDm}:pending-pr-`)) {
+    return { channelType: 'slack', platformId: `slack:${cfg.reviewsDm}`, threadId: storedThread };
+  }
+  return {
+    channelType: 'slack',
+    platformId: `slack:${cfg.reviewsChannel}`,
+    threadId: slackThreadId(cfg, storedThread),
+  };
+}
+
+export interface MaterializedAgentSession {
+  channelId: string;
+  threadTs: string;
+  aliasThreadId: string;
+}
+
+/** Resolve a pending reviewer thread after its first actionable Slack output. */
+export function materializedAgentSession(pendingThreadId: string): MaterializedAgentSession | null {
+  const db = new Database(path.join(DATA_DIR, 'v2.db'), { readonly: true, fileMustExist: true });
+  try {
+    const row = db
+      .prepare(
+        `SELECT a.platform_id, a.thread_ts, a.alias_thread_id
+           FROM reviewer_agent_session_aliases a
+           JOIN sessions s ON s.id = a.session_id
+          WHERE s.thread_id = ? AND a.closed_at IS NULL
+          ORDER BY a.created_at DESC LIMIT 1`,
+      )
+      .get(pendingThreadId) as
+      | { platform_id: string; thread_ts: string; alias_thread_id: string }
+      | undefined;
+    if (!row) return null;
+    return {
+      channelId: row.platform_id.replace(/^slack:/, '').split(':')[0],
+      threadTs: row.thread_ts,
+      aliasThreadId: row.alias_thread_id,
+    };
+  } catch (err) {
+    if (String(err).includes('no such table')) return null;
+    throw err;
+  } finally {
+    db.close();
+  }
+}
+
+export async function setMaterializedAgentSessionStatus(
+  cfg: Config,
+  pendingThreadId: string,
+  status: 'active' | 'processing' | 'suspended' | 'closed',
+  dryRun: boolean,
+): Promise<boolean> {
+  const session = materializedAgentSession(pendingThreadId);
+  if (!session) return false;
+  if (dryRun) {
+    console.log(`[dry-run] would set Slack agent session ${session.channelId}/${session.threadTs} to ${status}`);
+    return true;
+  }
+  await slackCall(cfg.slackBotToken, 'agents.sessions.setStatus', {
+    channel_id: session.channelId,
+    thread_ts: session.threadTs,
+    status,
+  });
+  const db = new Database(path.join(DATA_DIR, 'v2.db'));
+  try {
+    if (status === 'closed') {
+      db.prepare('UPDATE reviewer_agent_session_aliases SET closed_at = ? WHERE alias_thread_id = ?').run(
+        new Date().toISOString(),
+        session.aliasThreadId,
+      );
+    }
+  } finally {
+    db.close();
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------

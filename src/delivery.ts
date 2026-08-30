@@ -40,6 +40,7 @@ import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
+import type { AgentSessionStatus } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
@@ -83,6 +84,14 @@ export interface ChannelDeliveryAdapter {
     instance?: string,
     status?: string,
     statusKind?: 'auto' | 'agent',
+  ): Promise<void>;
+  setAgentSessionStatus?(
+    channelType: string,
+    platformId: string,
+    threadId: string,
+    status: AgentSessionStatus,
+    instance?: string,
+    options?: { title?: string; initiatorUserId?: string },
   ): Promise<void>;
 }
 
@@ -352,6 +361,14 @@ async function deliverMessage(
     await routeAgentMessage(msg, session);
     return;
   }
+
+  // Reviewer action-only agent sessions: background work uses an internal
+  // synthetic thread. Its first visible output materializes a real Slack DM
+  // agent session; later output follows the persisted alias. The module is
+  // deliberately narrow and returns null for every other delivery.
+  const { deliverPendingReviewerAgentSession } = await import('./modules/pr-reviewer-agent-sessions/index.js');
+  const reviewerDelivery = await deliverPendingReviewerAgentSession(msg, session, deliveryAdapter);
+  if (reviewerDelivery.handled) return reviewerDelivery.platformMessageId;
 
   // Permission check: the source agent must be allowed to deliver to this
   // channel destination. Two ways it passes:

@@ -20,7 +20,7 @@ Pick the flow from the message:
 
 1. Check out the code: follow the `pr-worktree` skill. It gives you a working tree at the PR head plus the base ref locally.
 2. `GET /repos/{o}/{r}/pulls/{n}` — capture `additions`, `deletions`, `changed_files`, `body`, `labels[]`, `mergeable_state` (metadata only; the code you already have locally).
-3. **Size guard**: `additions+deletions > 2000` or `changed_files > 40` → ask vardi in-thread:
+3. **Size guard**: `additions+deletions > 2000` or `changed_files > 40` → ask vardi in the agent session:
    > PR is too large for a useful full pass (X files, +Y/−Z). (a) high-level pass, (b) most-important files only, or (c) skip?
    Wait for his reply; scope the review accordingly.
 4. Read the diff locally (see `references/investigation.md` for the exact git commands, what to exclude, and the investigation budget). Read the repo's own `CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` (root + touched directories) — they are the conventions you review against.
@@ -35,7 +35,7 @@ Triggered by a message reporting a new head sha.
 1. Refresh the worktree (`pr-worktree` skill — it moves the checkout to the new head).
 2. `git diff <prev_head>...<new_head>` scoped to what shifted; decide which previous concerns still stand and what's newly introduced. Don't re-investigate settled ground.
 3. Comment **only on problems** that remain or are new — never "fixed ✓" acknowledgements; silence on a resolved thread is the acknowledgement. Post as a follow-up `event: "COMMENT"` review, inline only.
-4. Apply the persona's Slack notification gate. Findings and finding changes stay GitHub-only. Converged (prior blockers resolved, nothing new) → **Escalate** with recommendation APPROVE only when an equivalent APPROVE request is not already pending in the thread. Otherwise complete silently.
+4. Apply the persona's Slack notification gate. Findings and finding changes stay GitHub-only. Converged (prior blockers resolved, nothing new) → **Escalate** with recommendation APPROVE only when an equivalent APPROVE request is not already pending in the agent session. Otherwise complete silently.
 
 ## Ping-pong
 
@@ -50,9 +50,9 @@ If there is no GitHub reply to make and the actionable state is unchanged, compl
 
 ## Escalate
 
-Before posting, compare with the whole Slack thread. If the same recommendation, open-thread state, and requested human action are already pending, do not post again. A new head alone does not justify another verdict request.
+Before posting, compare with the whole Slack agent session. If the same recommendation, open-thread state, and requested human action are already pending, do not post again. A new head alone does not justify another verdict request.
 
-Post in-thread:
+Post in the agent session:
 
 ```
 <@U010NV4PV29> 🔔 Ready for final verdict
@@ -70,7 +70,7 @@ Diff: <files> files, +<additions>/−<deletions>
 
 ## Verdict
 
-Only ever in response to vardi's explicit reply in this thread:
+Only ever in response to vardi's explicit reply in this agent session:
 
 - `approve` (+ optional note) → `POST .../reviews` `{"event": "APPROVE", "body": "<note or empty>"}`.
 - `request changes` / `changes` (+ optional note) → same endpoint, `event: "REQUEST_CHANGES"`.

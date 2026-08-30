@@ -519,7 +519,14 @@ async function deliverToAgent(
     effectiveSessionMode = 'per-thread';
   }
 
-  const { session, created } = resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode);
+  // A reviewer PR can exist internally before Slack has a visible session.
+  // Once its first actionable output materializes a real DM thread, route
+  // replies through that persisted alias into the original isolated context.
+  const { findReviewerSessionByAlias } = await import('./modules/pr-reviewer-agent-sessions/index.js');
+  const aliased = findReviewerSessionByAlias(agent.agent_group_id, mg.id, effectiveThreadId);
+  const { session, created } = aliased
+    ? { session: aliased, created: false }
+    : resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode);
 
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source

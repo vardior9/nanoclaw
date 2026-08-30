@@ -30,7 +30,7 @@ import {
   fetchPrRefs,
   getBotUserId,
   getPrDetail,
-  getThreadReplies,
+  getSlackThreadReplies,
   hasForeignActivity,
   injectCliEvent,
   isPendingVerdictMessage,
@@ -38,15 +38,17 @@ import {
   loadConfig,
   loadState,
   parsePrKey,
-  postRootMessage,
-  postThreadMessage,
+  materializedAgentSession,
+  pendingSlackReviewThreadId,
+  postSlackThreadMessage,
   prKey,
   releaseLock,
   removeWorktreeAndPrune,
   repoPaths,
   saveState,
   searchOpenPRs,
-  slackThreadId,
+  reviewDestination,
+  setMaterializedAgentSessionStatus,
 } from './lib.js';
 
 interface Args {
@@ -79,13 +81,6 @@ interface TickCtx {
 
 function repoLogKey(owner: string, repo: string): string {
   return `${owner}/${repo}`;
-}
-
-function formatRootMessage(owner: string, repo: string, pr: PrDetail): string {
-  return (
-    `*<${pr.html_url}|${owner}/${repo}#${pr.number}: ${pr.title}>*\n` +
-    `Author: ${pr.user.login}  |  +${pr.additions}/-${pr.deletions}  |  ${pr.changed_files} files`
-  );
 }
 
 function formatKickoffMessage(owner: string, repo: string, pr: PrDetail): string {
@@ -137,26 +132,16 @@ function ensureBareCloneOnce(owner: string, repo: string, ctx: TickCtx): { ok: t
 
 async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCtx): Promise<void> {
   const { owner, repo } = ref;
-  let ts: string;
-  try {
-    ts = await postRootMessage(ctx.cfg, formatRootMessage(owner, repo, pr), ctx.args.dryRun);
-  } catch (err) {
-    console.error(`[pr-reviewer] ${key}: failed to post Slack root message`, err);
-    return; // no state recorded — next tick retries cleanly
-  }
-  if (ctx.args.dryRun) {
-    console.log(`[dry-run] ${key}: would bootstrap (root ts=${ts})`);
-    return;
-  }
+  const pendingThread = pendingSlackReviewThreadId(ctx.cfg, key);
 
   const clone = ensureBareCloneOnce(owner, repo, ctx);
   if (!clone.ok) {
-    await postThreadMessage(ctx.cfg, ts, `Could not set up the local clone for ${owner}/${repo}: ${clone.error}`, ctx.args.dryRun);
+    console.error(`[pr-reviewer] ${key}: could not set up local clone: ${clone.error}`);
     return; // no state recorded
   }
   const fetched = fetchPrRefs(owner, repo, pr.number, pr.base.ref, ctx.args.dryRun);
   if (!fetched.ok) {
-    await postThreadMessage(ctx.cfg, ts, `Could not fetch refs for PR #${pr.number}: ${fetched.error}`, ctx.args.dryRun);
+    console.error(`[pr-reviewer] ${key}: could not fetch refs: ${fetched.error}`);
     return;
   }
 
@@ -164,24 +149,23 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
     await injectCliEvent(
       {
         text: formatKickoffMessage(owner, repo, pr),
-        to: { channelType: 'slack', platformId: `slack:${ctx.cfg.reviewsChannel}`, threadId: slackThreadId(ctx.cfg, ts) },
+        to: reviewDestination(ctx.cfg, pendingThread),
         senderId: `slack:${ctx.cfg.ownerSlackId}`,
       },
       ctx.args.dryRun,
     );
   } catch (err) {
     console.error(`[pr-reviewer] ${key}: failed to inject kickoff`, err);
-    await postThreadMessage(
-      ctx.cfg,
-      ts,
-      'Could not reach the agent to start this review session. Will retry next tick.',
-      ctx.args.dryRun,
-    );
     return; // no state recorded
   }
 
+  if (ctx.args.dryRun) {
+    console.log(`[dry-run] ${key}: would bootstrap silently in ${pendingThread}`);
+    return;
+  }
+
   const newState: PrState = {
-    thread_ts: ts,
+    thread_ts: pendingThread,
     head_sha: pr.head.sha,
     base_ref: pr.base.ref,
     opened_at: new Date().toISOString(),
@@ -202,7 +186,7 @@ async function handlePush(key: string, ref: PrRef, pr: PrDetail, known: PrState,
   }
   const fetched = fetchPrRefs(owner, repo, pr.number, pr.base.ref, ctx.args.dryRun);
   if (!fetched.ok) {
-    await postThreadMessage(ctx.cfg, known.thread_ts, `Could not fetch new commits for PR #${pr.number}: ${fetched.error}`, ctx.args.dryRun);
+    console.error(`[pr-reviewer] ${key}: could not fetch new commits: ${fetched.error}`);
     return; // keep existing state, retry next tick
   }
 
@@ -210,14 +194,13 @@ async function handlePush(key: string, ref: PrRef, pr: PrDetail, known: PrState,
     await injectCliEvent(
       {
         text: formatReReviewMessage(owner, repo, pr),
-        to: { channelType: 'slack', platformId: `slack:${ctx.cfg.reviewsChannel}`, threadId: slackThreadId(ctx.cfg, known.thread_ts) },
+        to: reviewDestination(ctx.cfg, known.thread_ts),
         senderId: `slack:${ctx.cfg.ownerSlackId}`,
       },
       ctx.args.dryRun,
     );
   } catch (err) {
     console.error(`[pr-reviewer] ${key}: failed to inject re-review`, err);
-    await postThreadMessage(ctx.cfg, known.thread_ts, 'Could not reach the agent about new commits. Will retry.', ctx.args.dryRun);
     return;
   }
 
@@ -245,7 +228,7 @@ async function handleActivity(key: string, ref: PrRef, pr: PrDetail, known: PrSt
     await injectCliEvent(
       {
         text: formatActivityMessage(ref.owner, ref.repo, pr),
-        to: { channelType: 'slack', platformId: `slack:${ctx.cfg.reviewsChannel}`, threadId: slackThreadId(ctx.cfg, known.thread_ts) },
+        to: reviewDestination(ctx.cfg, known.thread_ts),
         senderId: `slack:${ctx.cfg.ownerSlackId}`,
       },
       ctx.args.dryRun,
@@ -263,9 +246,16 @@ async function handleActivity(key: string, ref: PrRef, pr: PrDetail, known: PrSt
 async function maybeRemind(key: string, ref: PrRef, pr: PrDetail, known: PrState, ctx: TickCtx): Promise<void> {
   if (known.nudges >= ctx.cfg.maxNudges) return;
 
+  const native = known.thread_ts.startsWith(`slack:${ctx.cfg.reviewsDm}:pending-pr-`)
+    ? materializedAgentSession(known.thread_ts)
+    : null;
+  if (known.thread_ts.startsWith(`slack:${ctx.cfg.reviewsDm}:pending-pr-`) && !native) return;
+  const channelId = native?.channelId ?? ctx.cfg.reviewsChannel;
+  const threadTs = native?.threadTs ?? known.thread_ts;
+
   let replies;
   try {
-    replies = await getThreadReplies(ctx.cfg, known.thread_ts, ctx.args.dryRun);
+    replies = await getSlackThreadReplies(ctx.cfg, channelId, threadTs, ctx.args.dryRun);
   } catch (err) {
     console.error(`[pr-reviewer] ${key}: failed to read thread replies`, err);
     return;
@@ -289,7 +279,7 @@ async function maybeRemind(key: string, ref: PrRef, pr: PrDetail, known: PrState
   if (ageMs < ctx.cfg.remindAfterHours * 3600 * 1000) return;
 
   const text = `<@${ctx.cfg.ownerSlackId}> — no verdict yet on ${ref.owner}/${ref.repo}#${ref.number} after ${ctx.cfg.remindAfterHours}h (nudge ${known.nudges + 1}/${ctx.cfg.maxNudges}).`;
-  await postThreadMessage(ctx.cfg, known.thread_ts, text, ctx.args.dryRun);
+  await postSlackThreadMessage(ctx.cfg, channelId, threadTs, text, ctx.args.dryRun);
   if (ctx.args.dryRun) return;
   ctx.state[key] = { ...known, nudges: known.nudges + 1, last_nudge_at: new Date().toISOString() };
   saveState(ctx.state);
@@ -306,6 +296,13 @@ async function closeOutPr(
   if (ctx.args.dryRun) {
     console.log(`[dry-run] ${key}: would remove worktree, prune, drop state (${reason})`);
     return;
+  }
+  if (known.thread_ts.startsWith(`slack:${ctx.cfg.reviewsDm}:pending-pr-`)) {
+    try {
+      await setMaterializedAgentSessionStatus(ctx.cfg, known.thread_ts, 'closed', false);
+    } catch (err) {
+      console.error(`[pr-reviewer] ${key}: failed to close native Slack agent session`, err);
+    }
   }
   removeWorktreeAndPrune(ref.owner, ref.repo, ref.number, ctx.args.dryRun);
   delete ctx.state[key];

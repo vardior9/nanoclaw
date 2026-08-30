@@ -119,6 +119,20 @@ describe('app context cache', () => {
     ]);
   });
 
+  it('normalizes Slack agent-view value entities, including message context', () => {
+    const event = {
+      entities: [
+        { type: 'slack#/types/channel_id', value: 'C123' },
+        { type: 'slack#/types/message_context', value: { channel_id: 'C123', message_ts: '1788.1' } },
+      ],
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(appContextEntities(event as any)).toEqual([
+      { type: 'slack#/types/channel_id', id: 'C123' },
+      { type: 'slack#/types/message_context', id: 'C123:1788.1' },
+    ]);
+  });
+
   it('attachAppContext attaches { entities } once and never overwrites SDK-provided context', () => {
     cacheAppContext('slack-pixel', 'D1', 'U1', [{ type: 'channel', id: 'C1' }]);
     const content: Record<string, unknown> = { text: 'hi' };
@@ -209,5 +223,29 @@ describe('agent-DM opened hook', () => {
       ),
     ).resolves.toBeUndefined();
     await bridge.teardown();
+  });
+});
+
+describe('native agent-session lifecycle', () => {
+  it('uses native processing only for real Slack DM threads', async () => {
+    const startTyping = vi.fn(async () => {});
+    const setAgentSessionStatus = vi.fn(async () => {});
+    const adapter = stubAdapter({ startTyping } as Partial<Adapter>) as Adapter & {
+      setAgentSessionStatus: typeof setAgentSessionStatus;
+    };
+    adapter.setAgentSessionStatus = setAgentSessionStatus;
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: true });
+
+    await bridge.setTyping?.('slack:D1', 'slack:D1:pending-pr-ZXhhbXBsZQ');
+    await bridge.setTyping?.('slack:D1', 'slack:D1:1788.1');
+    await bridge.setTyping?.('slack:D1', 'slack:D1:1788.1');
+    await bridge.setTyping?.('slack:C1', 'slack:C1:1788.2');
+
+    expect(setAgentSessionStatus).toHaveBeenCalledTimes(1);
+    expect(setAgentSessionStatus).toHaveBeenCalledWith('D1', '1788.1', 'processing');
+    expect(startTyping).toHaveBeenCalledWith('slack:C1:1788.2');
+
+    await bridge.setAgentSessionStatus?.('slack:D1', 'slack:D1:1788.1', 'suspended');
+    expect(setAgentSessionStatus).toHaveBeenLastCalledWith('D1', '1788.1', 'suspended', undefined);
   });
 });

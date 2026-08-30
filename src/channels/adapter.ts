@@ -104,6 +104,8 @@ export interface OutboundMessage {
   files?: OutboundFile[]; // file attachments from the session outbox
 }
 
+export type AgentSessionStatus = 'active' | 'processing' | 'suspended' | 'closed';
+
 /** Discovered conversation info (from syncConversations). */
 export interface ConversationInfo {
   platformId: string;
@@ -224,6 +226,13 @@ export interface ChannelAdapter {
     threadId: string | null,
     status?: string,
     statusKind?: 'auto' | 'agent',
+  ): Promise<void>;
+  /** Native lifecycle for platforms with first-class agent sessions. */
+  setAgentSessionStatus?(
+    platformId: string,
+    threadId: string,
+    status: AgentSessionStatus,
+    options?: { title?: string; initiatorUserId?: string },
   ): Promise<void>;
   syncConversations?(): Promise<ConversationInfo[]>;
   resolveChannelName?(platformId: string): Promise<string | null>;

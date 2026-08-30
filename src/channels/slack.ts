@@ -14,11 +14,11 @@
  * channelType stays 'slack' either way, so user ids, formatting, container
  * config, and the wiring-defaults declaration are shared across instances.
  */
-import { createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
+import { SlackAdapter, type SlackAdapterConfig } from '@chat-adapter/slack';
 
 import { readEnvFile } from '../env.js';
 import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults } from './adapter.js';
-import { createChatSdkBridge } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, dispatchAgentSessionStopped } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 /**
@@ -145,6 +145,51 @@ export interface SlackBridgeOptions {
   instanceKey?: string;
 }
 
+class NanoClawSlackAdapter extends SlackAdapter {
+  constructor(
+    config: SlackAdapterConfig,
+    private readonly instanceKey: string,
+  ) {
+    super(config);
+  }
+
+  async setAgentSessionStatus(
+    channelId: string,
+    threadTs: string,
+    status: 'active' | 'processing' | 'suspended' | 'closed',
+    options?: { title?: string; initiatorUserId?: string },
+  ): Promise<void> {
+    await this.webClient.apiCall('agents.sessions.setStatus', {
+      channel_id: channelId,
+      thread_ts: threadTs,
+      status,
+      ...(options?.title ? { title: options.title.slice(0, 200) } : {}),
+      ...(options?.initiatorUserId ? { initiator_user_id: options.initiatorUserId } : {}),
+    });
+  }
+
+  // @chat-adapter/slack 4.29 predates Slack's agent_session_stopped event.
+  // Preserve its full dispatcher, adding only the new native stop signal.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  protected override processEventPayload(payload: any, options?: any): void {
+    const event = payload?.type === 'event_callback' ? payload.event : undefined;
+    if (
+      event?.type === 'agent_session_stopped' &&
+      typeof event.channel === 'string' &&
+      typeof event.thread_ts === 'string' &&
+      typeof event.user === 'string'
+    ) {
+      dispatchAgentSessionStopped({
+        instance: this.instanceKey,
+        channelId: event.channel,
+        threadTs: event.thread_ts,
+        userId: event.user,
+      });
+    }
+    super.processEventPayload(payload, options);
+  }
+}
+
 /**
  * Build one Slack bot identity's bridge from its token set. The default app
  * is the zero-suffix call (used by the registration below); named instances
@@ -167,12 +212,16 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
   // WebSocket, so no public HTTPS endpoint is required. When set, the
   // signing secret is optional (Slack signs socket frames separately).
   const appToken = env[keys.appToken];
-  const slackAdapter = createSlackAdapter({
-    botToken,
-    signingSecret: env[keys.signingSecret],
-    appToken,
-    mode: appToken ? 'socket' : 'webhook',
-  });
+  const instanceKey = options.instanceKey ?? 'slack';
+  const slackAdapter = new NanoClawSlackAdapter(
+    {
+      botToken,
+      signingSecret: env[keys.signingSecret],
+      appToken,
+      mode: appToken ? 'socket' : 'webhook',
+    },
+    instanceKey,
+  );
   const bridge = createChatSdkBridge({
     adapter: slackAdapter,
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
