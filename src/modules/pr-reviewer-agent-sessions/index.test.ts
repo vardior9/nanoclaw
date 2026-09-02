@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeDb, getDb, initTestDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { setDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.js';
+import { resolveQuestionRender } from '../../channels/question-render-registry.js';
 import type { Session } from '../../types.js';
 import {
   deliverPendingReviewerAgentSession,
@@ -298,6 +299,42 @@ describe('reviewer action-only agent sessions', () => {
       delete process.env.FAKE_GH_LOG;
       fs.rmSync(bin, { recursive: true, force: true });
     }
+  });
+
+  it('retains expired card metadata so a late click renders a terminal result', async () => {
+    const { adapter } = fakeAdapter();
+    const head = '0123456789abcdef0123456789abcdef01234567';
+    await deliverPendingReviewerAgentSession(
+      {
+        ...msg,
+        content: JSON.stringify({
+          text: `PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"${head}"}\nReady`,
+        }),
+      },
+      session,
+      adapter,
+    );
+    const row = getDb().prepare('SELECT question_id FROM reviewer_verdict_requests').get() as { question_id: string };
+    getDb()
+      .prepare('UPDATE reviewer_agent_session_aliases SET closed_at = ? WHERE session_id = ?')
+      .run('2026-09-02T13:14:53.294Z', session.id);
+
+    expect(resolveQuestionRender(row.question_id)?.options).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: 'APPROVE', selectedLabel: 'Expired — PR already closed' }),
+      ]),
+    );
+    await expect(
+      handleReviewerVerdict({
+        questionId: row.question_id,
+        value: 'APPROVE',
+        userId: 'U010NV4PV29',
+        channelType: 'slack',
+        platformId: '',
+        threadId: null,
+      }),
+    ).resolves.toBe(true);
+    expect(getDb().prepare('SELECT COUNT(*) AS n FROM reviewer_verdict_requests').get()).toEqual({ n: 1 });
   });
 
   it('leaves an ordinary message awaiting the human', async () => {

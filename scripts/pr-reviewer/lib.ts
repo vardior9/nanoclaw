@@ -708,12 +708,6 @@ export async function setMaterializedAgentSessionStatus(
         new Date().toISOString(),
         session.aliasThreadId,
       );
-      db.prepare(
-        `DELETE FROM reviewer_verdict_requests
-          WHERE session_id IN (
-            SELECT session_id FROM reviewer_agent_session_aliases WHERE alias_thread_id = ?
-          )`,
-      ).run(session.aliasThreadId);
     }
   } finally {
     db.close();

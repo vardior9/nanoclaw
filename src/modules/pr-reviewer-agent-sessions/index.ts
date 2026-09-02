@@ -69,6 +69,7 @@ interface VerdictRequestRow {
   question: string;
   options_json: string;
   created_at: string;
+  closed_at: string | null;
 }
 
 registerMigration({
@@ -402,16 +403,27 @@ export async function deliverPendingReviewerAgentSession(
 
 function verdictRequest(questionId: string): VerdictRequestRow | undefined {
   if (!hasTable(getDb(), VERDICTS_TABLE)) return undefined;
-  return getDb().prepare(`SELECT * FROM ${VERDICTS_TABLE} WHERE question_id = ?`).get(questionId) as
-    | VerdictRequestRow
-    | undefined;
+  return getDb()
+    .prepare(
+      `SELECT v.*, a.closed_at
+         FROM ${VERDICTS_TABLE} v
+         JOIN ${TABLE} a ON a.session_id = v.session_id
+        WHERE v.question_id = ?`,
+    )
+    .get(questionId) as VerdictRequestRow | undefined;
 }
 
 registerQuestionRenderResolver((questionId) => {
   const request = verdictRequest(questionId);
-  return request
-    ? { title: request.title, question: request.question, options: JSON.parse(request.options_json) }
-    : undefined;
+  if (!request) return undefined;
+  const options = JSON.parse(request.options_json) as ReturnType<typeof normalizeOptions>;
+  return {
+    title: request.title,
+    question: request.question,
+    options: request.closed_at
+      ? options.map((option) => ({ ...option, selectedLabel: 'Expired — PR already closed' }))
+      : options,
+  };
 });
 
 function parsePrKey(key: string): { owner: string; repo: string; number: number } {
@@ -478,6 +490,10 @@ async function redeliverVerdictCard(request: VerdictRequestRow): Promise<void> {
 export async function handleReviewerVerdict(payload: ResponsePayload): Promise<boolean> {
   const request = verdictRequest(payload.questionId);
   if (!request) return false;
+  if (request.closed_at) {
+    log.info('Ignoring expired reviewer verdict click', { questionId: payload.questionId, pr: request.pr_key });
+    return true;
+  }
 
   const ownerSlackId = readEnvFile(['PR_OWNER_SLACK_ID']).PR_OWNER_SLACK_ID || 'U010NV4PV29';
   if (payload.channelType !== 'slack' || payload.userId !== ownerSlackId) {
@@ -606,7 +622,6 @@ setAgentSessionStoppedHandler(async ({ instance, channelId, threadTs, userId }) 
   if (!session) return;
 
   killContainer(session.id, `Slack agent session stopped by ${userId}`);
-  getDb().prepare(`DELETE FROM ${VERDICTS_TABLE} WHERE session_id = ?`).run(session.id);
   const inDb = openInboundDb(session.agent_group_id, session.id);
   try {
     inDb.prepare("UPDATE messages_in SET status = 'cancelled' WHERE status IN ('pending', 'processing')").run();
