@@ -332,7 +332,9 @@ export function hasForeignActivity(
     const items = [
       ...foreignIn(JSON.parse(issueComments.stdout) as Authored[]),
       ...foreignIn(JSON.parse(reviewComments.stdout) as Authored[]),
-      ...foreignIn(JSON.parse(reviews.stdout) as Authored[], true),
+      ...foreignIn(JSON.parse(reviews.stdout) as Authored[], true).filter(
+        (item) => item.state !== 'APPROVED' || Boolean(item.body?.trim()),
+      ),
     ].sort((a, b) => String(a.submitted_at ?? a.created_at).localeCompare(String(b.submitted_at ?? b.created_at)));
     const context = items
       .slice(-30)
@@ -706,6 +708,12 @@ export async function setMaterializedAgentSessionStatus(
         new Date().toISOString(),
         session.aliasThreadId,
       );
+      db.prepare(
+        `DELETE FROM reviewer_verdict_requests
+          WHERE session_id IN (
+            SELECT session_id FROM reviewer_agent_session_aliases WHERE alias_thread_id = ?
+          )`,
+      ).run(session.aliasThreadId);
     }
   } finally {
     db.close();

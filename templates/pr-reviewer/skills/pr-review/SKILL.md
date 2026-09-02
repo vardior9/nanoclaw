@@ -41,19 +41,21 @@ Choose the flow from the host event:
 
 The model recommends; the host acts. Never call GitHub with `APPROVE` or `REQUEST_CHANGES`, even if a Slack message contains those words.
 
-Emit exactly this as the only visible output, with compact evidence and the exact 40-character head SHA supplied by the host:
+Emit exactly this wrapped destination message as the only visible output, with compact evidence and the exact 40-character head SHA supplied by the host. The wrapper is required; never emit the marker as raw text:
 
 ```text
+<message to="vardi-dm">
 PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"<40-char sha>"}
-<@U010NV4PV29> 🔔 Ready for final verdict
+🔔 Ready for final verdict
 <title>
-[<full url>](<full url>)
+<full url>
 Author: `<author>`
 
 Recommendation: APPROVE
 Why: <one short paragraph>
 Open threads: <bullets or "none">
 Diff: <files> files, +<additions>/−<deletions>
+</message>
 ```
 
 `recommendation` may instead be `REQUEST_CHANGES`. Do not emit a second signal for the same head and actionable state. The marker is intercepted and rendered as a Slack card; users never type a verdict, and the model never receives the click.

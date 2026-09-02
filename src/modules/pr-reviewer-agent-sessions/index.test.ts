@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDb, getDb, initTestDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
-import type { ChannelDeliveryAdapter } from '../../delivery.js';
+import { setDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.js';
 import type { Session } from '../../types.js';
 import {
   deliverPendingReviewerAgentSession,
@@ -77,6 +77,7 @@ function fakeAdapter() {
     }),
     setAgentSessionStatus: vi.fn(async () => {}),
   };
+  setDeliveryAdapter(adapter);
   return { adapter, counts: () => ({ rootCalls, threadCalls }) };
 }
 
@@ -160,6 +161,7 @@ describe('reviewer action-only agent sessions', () => {
     expect(JSON.parse(String(delivery[4]))).toMatchObject({
       type: 'ask_question',
       title: 'Final PR verdict',
+      question: 'Ready for final verdict\nhttps://github.com/apiiro/guardian/pull/123',
       options: expect.arrayContaining([expect.objectContaining({ value: 'APPROVE' })]),
     });
     expect(getDb().prepare('SELECT pr_key, head_sha, recommendation FROM reviewer_verdict_requests').get()).toEqual({
@@ -214,11 +216,13 @@ describe('reviewer action-only agent sessions', () => {
     const ghPath = path.join(bin, 'gh');
     fs.writeFileSync(
       ghPath,
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$FAKE_GH_LOG"\ncase "$*" in\n  *"--jq .head.sha"*) printf '${head}\\n' ;;\n  *) printf '{}\\n' ;;\nesac\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$FAKE_GH_LOG"\ncase "$*" in\n  *"@tsv"*) printf '${head}\\topen\\tfalse\\n' ;;\n  *) printf '{}\\n' ;;\nesac\n`,
       { mode: 0o755 },
     );
     const oldPath = process.env.PATH;
+    const oldGhBin = process.env.PR_REVIEWER_GH_BIN;
     process.env.PATH = `${bin}:${oldPath}`;
+    process.env.PR_REVIEWER_GH_BIN = ghPath;
     process.env.FAKE_GH_LOG = logPath;
     try {
       await expect(
@@ -236,6 +240,61 @@ describe('reviewer action-only agent sessions', () => {
       expect(getDb().prepare('SELECT COUNT(*) AS n FROM reviewer_verdict_requests').get()).toEqual({ n: 0 });
     } finally {
       process.env.PATH = oldPath;
+      if (oldGhBin === undefined) delete process.env.PR_REVIEWER_GH_BIN;
+      else process.env.PR_REVIEWER_GH_BIN = oldGhBin;
+      delete process.env.FAKE_GH_LOG;
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('closes the card without submitting when GitHub says the PR is already merged', async () => {
+    const { adapter } = fakeAdapter();
+    const head = '0123456789abcdef0123456789abcdef01234567';
+    await deliverPendingReviewerAgentSession(
+      {
+        ...msg,
+        content: JSON.stringify({
+          text: `PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"${head}"}\nReady`,
+        }),
+      },
+      session,
+      adapter,
+    );
+    const row = getDb().prepare('SELECT question_id FROM reviewer_verdict_requests').get() as { question_id: string };
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-gh-'));
+    const logPath = path.join(bin, 'calls.log');
+    const ghPath = path.join(bin, 'gh');
+    fs.writeFileSync(
+      ghPath,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$FAKE_GH_LOG"\nprintf '${head}\\tclosed\\ttrue\\n'\n`,
+      { mode: 0o755 },
+    );
+    const oldGhBin = process.env.PR_REVIEWER_GH_BIN;
+    process.env.PR_REVIEWER_GH_BIN = ghPath;
+    process.env.FAKE_GH_LOG = logPath;
+    try {
+      await expect(
+        handleReviewerVerdict({
+          questionId: row.question_id,
+          value: 'APPROVE',
+          userId: 'U010NV4PV29',
+          channelType: 'slack',
+          platformId: '',
+          threadId: null,
+        }),
+      ).resolves.toBe(true);
+      expect(fs.readFileSync(logPath, 'utf8')).not.toContain('/reviews');
+      expect(getDb().prepare('SELECT COUNT(*) AS n FROM reviewer_verdict_requests').get()).toEqual({ n: 0 });
+      expect(adapter.setAgentSessionStatus).toHaveBeenLastCalledWith(
+        'slack',
+        'slack:DOWNER',
+        'slack:DOWNER:1788000000.123456',
+        'closed',
+        'slack',
+      );
+    } finally {
+      if (oldGhBin === undefined) delete process.env.PR_REVIEWER_GH_BIN;
+      else process.env.PR_REVIEWER_GH_BIN = oldGhBin;
       delete process.env.FAKE_GH_LOG;
       fs.rmSync(bin, { recursive: true, force: true });
     }

@@ -115,6 +115,19 @@ registerMigration({
   },
 });
 
+registerMigration({
+  version: 3,
+  name: 'module:pr-reviewer-agent-sessions:cleanup-closed-verdicts',
+  up(db: Database.Database) {
+    db.exec(`
+      DELETE FROM ${VERDICTS_TABLE}
+       WHERE session_id IN (
+         SELECT session_id FROM ${TABLE} WHERE closed_at IS NOT NULL
+       );
+    `);
+  },
+});
+
 /**
  * Slack fixes an agent session's title at creation: `agents.sessions.setStatus`
  * accepts a `title` only on the call that creates the session and silently
@@ -189,17 +202,27 @@ function verdictSignal(content: string): VerdictSignal | null {
     ) {
       return null;
     }
-    return { recommendation, headSha, question };
+    return { recommendation, headSha, question: verdictCardQuestion(question) };
   } catch {
     return null;
   }
 }
 
+/** Slack cards render this field as rich text, not GitHub-flavoured Markdown. */
+function verdictCardQuestion(question: string): string {
+  return question
+    .replace(/^(?:<|&lt;)@[A-Z0-9]+(?:>|&gt;)\s*/i, '')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_match, label: string, url: string) =>
+      label === url ? url : `${label}: ${url}`,
+    )
+    .trim();
+}
+
 const VERDICT_OPTIONS: RawOption[] = [
-  { label: 'Approve on GitHub', selectedLabel: 'Approval requested', value: 'APPROVE', style: 'primary' },
+  { label: 'Approve on GitHub', selectedLabel: 'Approve selected', value: 'APPROVE', style: 'primary' },
   {
     label: 'Request changes on GitHub',
-    selectedLabel: 'Changes requested',
+    selectedLabel: 'Request changes selected',
     value: 'REQUEST_CHANGES',
     style: 'danger',
   },
@@ -398,8 +421,14 @@ function parsePrKey(key: string): { owner: string; repo: string; number: number 
 }
 
 function gh(args: string[]): Promise<string> {
+  const configured =
+    process.env.PR_REVIEWER_GH_BIN || readEnvFile(['PR_REVIEWER_GH_BIN']).PR_REVIEWER_GH_BIN || undefined;
+  const binary =
+    configured ??
+    ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh'].find((candidate) => fs.existsSync(candidate)) ??
+    'gh';
   return new Promise((resolve, reject) => {
-    execFile('gh', args, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(binary, args, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) reject(new Error(stderr.trim() || error.message));
       else resolve(stdout.trim());
     });
@@ -473,7 +502,36 @@ export async function handleReviewerVerdict(payload: ResponsePayload): Promise<b
   const endpoint = `repos/${ref.owner}/${ref.repo}/pulls/${ref.number}`;
   const url = `https://github.com/${ref.owner}/${ref.repo}/pull/${ref.number}`;
   try {
-    const currentHead = await gh(['api', endpoint, '--jq', '.head.sha']);
+    const [currentHead, state, merged] = (
+      await gh(['api', endpoint, '--jq', '[.head.sha, .state, .merged] | @tsv'])
+    ).split('\t');
+    if (!currentHead || !state || !merged) throw new Error('GitHub returned incomplete PR state');
+    if (state !== 'open' || merged === 'true') {
+      getDb().prepare(`DELETE FROM ${VERDICTS_TABLE} WHERE question_id = ?`).run(payload.questionId);
+      await deliverVerdictMessage(
+        request,
+        `ℹ️ Verdict not submitted: ${url} is already ${merged === 'true' ? 'merged' : state}.`,
+      );
+      const alias = aliasForSession(request.session_id);
+      const session = getSession(request.session_id);
+      const mg = session?.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+      const adapter = getDeliveryAdapter();
+      if (alias && mg && adapter?.setAgentSessionStatus) {
+        await adapter.setAgentSessionStatus(
+          mg.channel_type,
+          alias.platform_id,
+          alias.alias_thread_id,
+          'closed',
+          mg.instance,
+        );
+        if (!alias.closed_at) {
+          getDb()
+            .prepare(`UPDATE ${TABLE} SET closed_at = ? WHERE session_id = ?`)
+            .run(new Date().toISOString(), request.session_id);
+        }
+      }
+      return true;
+    }
     if (currentHead !== request.head_sha) {
       getDb().prepare(`DELETE FROM ${VERDICTS_TABLE} WHERE question_id = ?`).run(payload.questionId);
       await deliverVerdictMessage(
@@ -548,6 +606,7 @@ setAgentSessionStoppedHandler(async ({ instance, channelId, threadTs, userId }) 
   if (!session) return;
 
   killContainer(session.id, `Slack agent session stopped by ${userId}`);
+  getDb().prepare(`DELETE FROM ${VERDICTS_TABLE} WHERE session_id = ?`).run(session.id);
   const inDb = openInboundDb(session.agent_group_id, session.id);
   try {
     inDb.prepare("UPDATE messages_in SET status = 'cancelled' WHERE status IN ('pending', 'processing')").run();

@@ -1,8 +1,10 @@
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 import { describe, expect, it } from 'vitest';
 
-import { isPendingVerdictMessage } from './lib.js';
+import { hasForeignActivity, isPendingVerdictMessage } from './lib.js';
 
 describe('PR reviewer notification policy', () => {
   it('only treats an explicit final-verdict request as reminder-eligible', () => {
@@ -29,5 +31,27 @@ describe('PR reviewer notification policy', () => {
     expect(persona).toContain('one final-verdict card is needed');
     expect(dispatcher).toContain('pendingSlackReviewThreadId');
     expect(dispatcher).not.toContain('postRootMessage');
+  });
+
+  it('does not wake the model for an empty approval-only review event', () => {
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-activity-gh-'));
+    const ghPath = path.join(bin, 'gh');
+    fs.writeFileSync(
+      ghPath,
+      `#!/bin/sh\ncase "$*" in\n  *"/reviews"*) printf '[{"user":{"login":"teammate"},"state":"APPROVED","body":"","submitted_at":"2026-09-02T08:00:00Z"}]' ;;\n  *) printf '[]' ;;\nesac\n`,
+      { mode: 0o755 },
+    );
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath}`;
+    try {
+      expect(hasForeignActivity('apiiro', 'guardian', 123, '2026-09-02T07:00:00Z', 'vardior9')).toEqual({
+        ok: true,
+        foreign: false,
+        context: '',
+      });
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
   });
 });
