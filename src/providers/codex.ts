@@ -75,14 +75,9 @@ registerProviderContainerConfig(
     }
     const agentsDir = path.join(ctx.groupDir, '.agents');
     if (fs.existsSync(agentsDir)) {
-      mounts.push({ hostPath: agentsDir, containerPath: '/workspace/agent/.agents', readonly: true });
-      // Codex only scans the CWD-level `.agents/skills` when the CWD is inside a
-      // git repo; the agent workspace (/workspace/agent) is not one, so skills
-      // materialized there are invisible. Codex DOES scan the user-level
-      // `$HOME/.agents/skills` unconditionally, so mount the same dir at $HOME
-      // to make the group's template + shared skills discoverable. Verified
-      // against codex-cli 0.141: user-level `.agents/skills` resolves at a
-      // non-git CWD. Skill materialization stays provider-neutral (group-skills.ts).
+      // One discovery plane only. Newer Codex versions discover both the CWD
+      // and user-level .agents trees even at this non-git workspace; mounting
+      // the same directory at both paths duplicates every skill in the prompt.
       mounts.push({ hostPath: agentsDir, containerPath: '/home/node/.agents', readonly: true });
     }
 

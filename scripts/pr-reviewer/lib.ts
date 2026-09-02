@@ -114,6 +114,14 @@ export function parsePrKey(key: string): PrRef {
 export interface PrState {
   thread_ts: string;
   head_sha: string;
+  /**
+   * PR title as of the tick that opened tracking. The only host-side source
+   * for the Slack agent-session title, which the reviewer module reads from
+   * this file — Slack fixes that title at creation, so it identifies the PR
+   * (`lim 48766 <subject>`) rather than carrying review state. Optional:
+   * entries written before this field existed fall back to `<repo> <number>`.
+   */
+  pr_title?: string;
   base_ref: string;
   opened_at: string;
   last_nudge_at: string | null;
@@ -237,7 +245,11 @@ export function searchOpenPRs(query: string): PrRef[] {
     });
 }
 
-export function getPrDetail(owner: string, repo: string, number: number): { ok: true; data: PrDetail } | { ok: false; error: string } {
+export function getPrDetail(
+  owner: string,
+  repo: string,
+  number: number,
+): { ok: true; data: PrDetail } | { ok: false; error: string } {
   const res = runGh(['api', `repos/${owner}/${repo}/pulls/${number}`]);
   if (!res.ok) return { ok: false, error: res.error };
   try {
@@ -262,7 +274,11 @@ export function latestSelfReviewState(
   const res = runGh(['api', `repos/${owner}/${repo}/pulls/${number}/reviews`, '--paginate']);
   if (!res.ok) return { ok: false, error: res.error };
   try {
-    const reviews = JSON.parse(res.stdout) as Array<{ user?: { login?: string }; state?: string; submitted_at?: string }>;
+    const reviews = JSON.parse(res.stdout) as Array<{
+      user?: { login?: string };
+      state?: string;
+      submitted_at?: string;
+    }>;
     const mine = reviews
       .filter((r) => r.user?.login === selfLogin && r.submitted_at)
       .sort((a, b) => String(a.submitted_at).localeCompare(String(b.submitted_at)));
@@ -285,15 +301,21 @@ export function hasForeignActivity(
   number: number,
   sinceIso: string,
   selfLogin: string,
-): { ok: true; foreign: boolean } | { ok: false; error: string } {
+): { ok: true; foreign: boolean; context: string } | { ok: false; error: string } {
   interface Authored {
     user?: { login?: string } | null;
     submitted_at?: string;
+    created_at?: string;
+    body?: string;
+    state?: string;
+    path?: string;
+    line?: number | null;
+    html_url?: string;
   }
-  const foreignIn = (items: Authored[], after?: boolean): boolean =>
-    items.some(
+  const foreignIn = (items: Authored[], after?: boolean): Authored[] =>
+    items.filter(
       (item) =>
-        (!after || (item.submitted_at ?? '') > sinceIso) &&
+        (!after || (item.submitted_at ?? item.created_at ?? '') > sinceIso) &&
         item.user?.login !== undefined &&
         item.user.login !== selfLogin,
     );
@@ -307,13 +329,105 @@ export function hasForeignActivity(
   if (!reviews.ok) return { ok: false, error: reviews.error };
 
   try {
-    const foreign =
-      foreignIn(JSON.parse(issueComments.stdout) as Authored[]) ||
-      foreignIn(JSON.parse(reviewComments.stdout) as Authored[]) ||
-      foreignIn(JSON.parse(reviews.stdout) as Authored[], true);
-    return { ok: true, foreign };
+    const items = [
+      ...foreignIn(JSON.parse(issueComments.stdout) as Authored[]),
+      ...foreignIn(JSON.parse(reviewComments.stdout) as Authored[]),
+      ...foreignIn(JSON.parse(reviews.stdout) as Authored[], true),
+    ].sort((a, b) => String(a.submitted_at ?? a.created_at).localeCompare(String(b.submitted_at ?? b.created_at)));
+    const context = items
+      .slice(-30)
+      .map((item) => {
+        const where = item.path ? `${item.path}${item.line ? `:${item.line}` : ''}` : (item.state ?? 'conversation');
+        const body = (item.body ?? '').replace(/\s+/g, ' ').trim().slice(0, 800) || '(no body)';
+        return `- ${item.user?.login} at ${where}: ${body}${item.html_url ? ` (${item.html_url})` : ''}`;
+      })
+      .join('\n');
+    return { ok: true, foreign: items.length > 0, context };
   } catch (err) {
     return { ok: false, error: `unparseable gh response: ${String(err)}` };
+  }
+}
+
+export function getCommitDelta(
+  owner: string,
+  repo: string,
+  previousHead: string,
+  currentHead: string,
+): { ok: true; context: string } | { ok: false; error: string } {
+  const { bare } = repoPaths(owner, repo);
+  const stat = runGit(['-C', bare, 'diff', '--stat', '--compact-summary', previousHead, currentHead]);
+  if (!stat.ok) return stat;
+  const names = runGit(['-C', bare, 'diff', '--name-status', previousHead, currentHead]);
+  if (!names.ok) return names;
+  const changed = names.stdout.trim().split('\n').filter(Boolean);
+  const shown = changed.slice(0, 80);
+  return {
+    ok: true,
+    context: [
+      `Previous reviewed head: ${previousHead}`,
+      `Current head: ${currentHead}`,
+      `Commit delta (${changed.length} paths):`,
+      shown.join('\n') || '(no path changes)',
+      changed.length > shown.length ? `... ${changed.length - shown.length} more paths` : '',
+      'Delta stat:',
+      stat.stdout.trim() || '(empty)',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  };
+}
+
+export function getUnresolvedSelfReviewThreads(
+  owner: string,
+  repo: string,
+  number: number,
+  selfLogin: string,
+): { ok: true; context: string } | { ok: false; error: string } {
+  const query = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved isOutdated path line comments(first:20){nodes{databaseId body author{login} url}}}}}}}`;
+  const res = runGh([
+    'api',
+    'graphql',
+    '-f',
+    `query=${query}`,
+    '-F',
+    `owner=${owner}`,
+    '-F',
+    `repo=${repo}`,
+    '-F',
+    `number=${number}`,
+  ]);
+  if (!res.ok) return res;
+  try {
+    type Comment = { databaseId: number; body: string; author?: { login?: string }; url: string };
+    type Thread = {
+      isResolved: boolean;
+      isOutdated: boolean;
+      path: string;
+      line?: number;
+      comments: { nodes: Comment[] };
+    };
+    const parsed = JSON.parse(res.stdout) as {
+      data?: { repository?: { pullRequest?: { reviewThreads?: { nodes?: Thread[] } } } };
+    };
+    const threads = (parsed.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []).filter(
+      (thread) => !thread.isResolved && thread.comments.nodes[0]?.author?.login === selfLogin,
+    );
+    const context = threads
+      .map((thread) => {
+        const root = thread.comments.nodes[0];
+        const replies = thread.comments.nodes
+          .slice(1)
+          .map((c) => `${c.author?.login ?? 'unknown'}: ${c.body.replace(/\s+/g, ' ').slice(0, 500)}`);
+        return [
+          `- ${thread.path}${thread.line ? `:${thread.line}` : ''}${thread.isOutdated ? ' (outdated)' : ''}`,
+          `  reviewer #${root.databaseId}: ${root.body.replace(/\s+/g, ' ').slice(0, 800)}`,
+          ...replies.map((reply) => `  reply: ${reply}`),
+        ].join('\n');
+      })
+      .join('\n');
+    return { ok: true, context: context || 'none' };
+  } catch (err) {
+    return { ok: false, error: `unparseable review-thread response: ${String(err)}` };
   }
 }
 
@@ -342,7 +456,11 @@ function runGit(args: string[]): { ok: true; stdout: string } | { ok: false; err
 }
 
 /** Idempotent: no-ops if the bare clone already exists. */
-export function ensureBareClone(owner: string, repo: string, dryRun: boolean): { ok: true } | { ok: false; error: string } {
+export function ensureBareClone(
+  owner: string,
+  repo: string,
+  dryRun: boolean,
+): { ok: true } | { ok: false; error: string } {
   const { bare } = repoPaths(owner, repo);
   if (fs.existsSync(path.join(bare, 'HEAD'))) return { ok: true };
   if (dryRun) {
@@ -408,7 +526,11 @@ export function containerWorktreePath(owner: string, repo: string, number: numbe
 
 const SLACK_API = 'https://slack.com/api';
 
-async function slackCall(token: string, method: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function slackCall(
+  token: string,
+  method: string,
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
   const res = await fetch(`${SLACK_API}/${method}`, {
     method: 'POST',
     headers: {
@@ -545,9 +667,7 @@ export function materializedAgentSession(pendingThreadId: string): MaterializedA
           WHERE s.thread_id = ? AND a.closed_at IS NULL
           ORDER BY a.created_at DESC LIMIT 1`,
       )
-      .get(pendingThreadId) as
-      | { platform_id: string; thread_ts: string; alias_thread_id: string }
-      | undefined;
+      .get(pendingThreadId) as { platform_id: string; thread_ts: string; alias_thread_id: string } | undefined;
     if (!row) return null;
     return {
       channelId: row.platform_id.replace(/^slack:/, '').split(':')[0],

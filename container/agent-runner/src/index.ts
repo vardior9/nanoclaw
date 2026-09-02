@@ -118,6 +118,7 @@ async function main(): Promise<void> {
   await runPollLoop({
     provider,
     providerName,
+    continuationMode: config.continuationMode,
     cwd: CWD,
     systemContext: { instructions },
   });

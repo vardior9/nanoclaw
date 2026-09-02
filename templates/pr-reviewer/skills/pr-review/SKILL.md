@@ -1,88 +1,65 @@
 ---
 name: pr-review
-description: Review the GitHub PR assigned to this session — new-PR review, re-review after a push, replying to review-thread comments (ping-pong), and escalating to vardi for the final verdict. Use whenever the session's kickoff message names a PR, or a follow-up message reports a new head sha, new activity, or vardi's verdict reply.
+description: "Review the PR identified by the current host event: initial review, exact-head re-review, or bounded response to new external activity."
 ---
 
-# PR review flows
+# PR review
 
-The dispatcher already did discovery: your first message carries the PR (`<owner>/<repo>#<n>`), full URL, title, author, head sha, base ref, and container paths. Never search for PRs yourself, never re-poll. GitHub REST goes through the proxy — **do not set an Authorization header**; the gateway injects the PAT for `api.github.com`.
+The host already selected the PR and prepared its local refs. Never discover or poll PRs. GitHub REST goes through the proxy; never add an Authorization header.
 
-Pick the flow from the message:
+Choose the flow from the host event:
 
-| Message says | Flow |
-|---|---|
-| New PR assigned | **New PR** |
-| New head sha (author pushed) | **Re-review** |
-| New activity, same sha (comments) | **Ping-pong** |
-| `approve` / `request changes` / `hold` from vardi | **Verdict** |
+| Event                   | Scope                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------- |
+| New PR                  | Full diff against the named base                                                      |
+| New head                | Only the host-listed old-to-new commit delta, plus listed unresolved reviewer threads |
+| New activity, same head | Only the host-listed external comments/reviews and the code needed to verify them     |
 
-## New PR
+## Initial review
 
-1. Check out the code: follow the `pr-worktree` skill. It gives you a working tree at the PR head plus the base ref locally.
-2. `GET /repos/{o}/{r}/pulls/{n}` — capture `additions`, `deletions`, `changed_files`, `body`, `labels[]`, `mergeable_state` (metadata only; the code you already have locally).
-3. **Size guard**: `additions+deletions > 2000` or `changed_files > 40` → ask vardi in the agent session:
-   > PR is too large for a useful full pass (X files, +Y/−Z). (a) high-level pass, (b) most-important files only, or (c) skip?
-   Wait for his reply; scope the review accordingly.
-4. Read the diff locally (see `references/investigation.md` for the exact git commands, what to exclude, and the investigation budget). Read the repo's own `CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` (root + touched directories) — they are the conventions you review against.
-5. Identify problems only: bugs, risks, missing tests, convention violations. For each, anchor to a file + RIGHT-side line number in the PR diff (see `references/github-api.md` for anchoring rules).
-6. **No problems** → post nothing on GitHub. Go straight to **Escalate** with recommendation APPROVE.
-7. **Problems** → post one review: `POST /repos/{o}/{r}/pulls/{n}/reviews` with `event: "COMMENT"`, inline `comments[]`, `body` empty unless a genuinely PR-wide concern exists (shapes in `references/github-api.md`). Do not summarize findings in Slack. If nothing blocks, continue to **Escalate**; if blockers exist, end the turn silently — the author's response comes back as ping-pong or re-review.
+1. Run the `pr-worktree` skill and read repository instructions in scope.
+2. Use the supplied PR metadata. Fetch extra GitHub metadata only if necessary to decide a finding.
+3. If the PR exceeds 2,000 changed lines or 40 files, ask Vardi once to choose full, high-value-files, or skip scope.
+4. Investigate locally using `references/investigation.md`. Trace only as far as needed to prove or dismiss concrete risks.
+5. Post problems in one `COMMENT` review using `references/github-api.md`. Clean means no GitHub review.
+6. If blockers remain, stop silently. If the review converged, emit the final-verdict signal.
 
 ## Re-review
 
-Triggered by a message reporting a new head sha.
+1. Refresh the worktree to the supplied new head.
+2. Review only the supplied old-to-new delta. Re-check the supplied unresolved reviewer threads against changed code; do not reconstruct or reread the original full review.
+3. Post only remaining or new problems. Do not acknowledge fixes.
+4. If blockers remain, stop silently. If converged, emit one final-verdict signal for the new exact head.
 
-1. Refresh the worktree (`pr-worktree` skill — it moves the checkout to the new head).
-2. `git diff <prev_head>...<new_head>` scoped to what shifted; decide which previous concerns still stand and what's newly introduced. Don't re-investigate settled ground.
-3. Comment **only on problems** that remain or are new — never "fixed ✓" acknowledgements; silence on a resolved thread is the acknowledgement. Post as a follow-up `event: "COMMENT"` review, inline only.
-4. Apply the persona's Slack notification gate. Findings and finding changes stay GitHub-only. Converged (prior blockers resolved, nothing new) → **Escalate** with recommendation APPROVE only when an equivalent APPROVE request is not already pending in the agent session. Otherwise complete silently.
+## New activity
 
-## Ping-pong
+1. Work from the host-supplied external activity list; do not refetch all PR discussion.
+2. Verify code-dependent pushback locally. Reply in the same GitHub thread when warranted; acknowledgements need no reply.
+3. If the actionable state is unchanged, stop silently. If converged, emit the final-verdict signal.
 
-Triggered by a message reporting new comments without a push.
+## Final-verdict signal
 
-1. Fetch what's new: `GET /repos/{o}/{r}/issues/{n}/comments?since=<ts>` and `GET /repos/{o}/{r}/pulls/{n}/comments?since=<ts>`; ignore your own (`vardior9`-authored review-bot comments are yours).
-2. Pushback that hinges on code → verify in the worktree before conceding or holding your ground. If you've changed your mind, say so plainly.
-3. Reply in the same thread: inline → `POST /repos/{o}/{r}/pulls/{n}/comments/{comment_id}/replies`; conversation-level → `POST /repos/{o}/{r}/issues/{n}/comments`. "Will fix" / acks get no reply.
-4. Convergence check: all concerns addressed and no open questions → **Escalate** (APPROVE). Blockers remain and the author acked-but-won't-fix or pushed back unconvincingly → **Escalate** (REQUEST_CHANGES). Still active → end the turn silently after any needed GitHub reply.
+The model recommends; the host acts. Never call GitHub with `APPROVE` or `REQUEST_CHANGES`, even if a Slack message contains those words.
 
-If there is no GitHub reply to make and the actionable state is unchanged, complete silently. Never report that no reply or follow-up was warranted.
+Emit exactly this as the only visible output, with compact evidence and the exact 40-character head SHA supplied by the host:
 
-## Escalate
-
-Before posting, compare with the whole Slack agent session. If the same recommendation, open-thread state, and requested human action are already pending, do not post again. A new head alone does not justify another verdict request.
-
-Post in the agent session:
-
-```
+```text
+PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"<40-char sha>"}
 <@U010NV4PV29> 🔔 Ready for final verdict
 <title>
 [<full url>](<full url>)
 Author: `<author>`
 
-Recommendation: APPROVE | REQUEST_CHANGES
-
+Recommendation: APPROVE
 Why: <one short paragraph>
-
-Open threads: <bullets, or "none">
+Open threads: <bullets or "none">
 Diff: <files> files, +<additions>/−<deletions>
 ```
 
-## Verdict
+`recommendation` may instead be `REQUEST_CHANGES`. Do not emit a second signal for the same head and actionable state. The marker is intercepted and rendered as a Slack card; users never type a verdict, and the model never receives the click.
 
-Only ever in response to vardi's explicit reply in this agent session:
+## Failures and memory
 
-- `approve` (+ optional note) → `POST .../reviews` `{"event": "APPROVE", "body": "<note or empty>"}`.
-- `request changes` / `changes` (+ optional note) → same endpoint, `event: "REQUEST_CHANGES"`.
-- `hold` → wait silently.
-- Anything else → one clarifying question.
+Surface an error only when Vardi must act; include the linked PR, backticked author, and one concrete action. Transient failures stay internal. Retry at most once.
 
-After submitting, complete silently; GitHub is the receipt. Then write your memory inbox note if the review taught you something transferable (persona: Memory).
-
-## Edge cases
-
-- **Bot-authored PRs** (dependabot/renovate): review terser — real risk only (breaking changes, CVEs), no nits.
-- **Author is vardi**: still review; open with "you authored this — sanity check follows".
-- **Your review got dismissed** (`GET .../pulls/{n}/reviews` → `state: "DISMISSED"`): treat the next event as a fresh look; stay silent unless one of the two notification-gate cases applies.
-- **401/403/app_not_connected from the API**: follow the OneCLI gateway skill — surface the connect URL in-thread once and stop. Stay silent on the same unchanged credential blocker until vardi responds or the error changes.
-- **Mid-flow error**: post ⚠️ only when vardi must act. Include the PR as `[<full url>](<full url>)`, the backticked author, and `failed: <reason>` in-thread; don't retry more than once and never repeat an unchanged failure. Transient or self-recoverable failures stay internal.
+If this review produced a transferable lesson, write the concise inbox note required by the persona before completing.

@@ -39,7 +39,7 @@ const MEMORY_POINTER = [
 ].join('\n\n');
 
 const NATIVE_RUNTIME_SKILLS_POINTER = [
-  'Selected NanoClaw runtime skills are available as Codex-native skills at `/workspace/agent/.agents/skills`.',
+  'Selected NanoClaw runtime skills are available as Codex-native skills at `/home/node/.agents/skills`.',
   'Each skill directory contains a `SKILL.md` with its trigger description plus any supporting files, and points to the read-only shared skill source under `/app/skills`.',
   'Use skill discovery to load these skills only when their descriptions match the task. Full skill instructions live in the skill directories, not in `AGENTS.md`.',
   'Skills YOU author or install yourself go in `~/.codex/skills/<name>/SKILL.md` — persistent across sessions and discovered by Codex automatically. Never write skills elsewhere: paths outside `~/.codex` and `~/.agents` are ephemeral or not discovered.',
@@ -50,10 +50,19 @@ interface AgentsMdSection {
   content: string;
 }
 
+type ContextProfile = 'standard' | 'focused';
+
+const CONTEXT_PROFILES: Record<ContextProfile, ReadonlySet<string>> = {
+  standard: new Set(['runtime', 'memory', 'skills', 'modules', 'mcp']),
+  focused: new Set(['memory', 'skills', 'mcp']),
+};
+
 export function composeGroupAgentsMd(group: AgentGroup, groupDir: string): void {
   if (!fs.existsSync(groupDir)) fs.mkdirSync(groupDir, { recursive: true });
 
   const configRow = getContainerConfig(group.id);
+  const profile: ContextProfile = configRow?.context_profile === 'focused' ? 'focused' : 'standard';
+  const includes = CONTEXT_PROFILES[profile];
   const mcpServers: Record<string, McpServerConfig> = configRow
     ? (JSON.parse(configRow.mcp_servers) as Record<string, McpServerConfig>)
     : {};
@@ -73,16 +82,16 @@ export function composeGroupAgentsMd(group: AgentGroup, groupDir: string): void 
   if (persona) pushSection('Persona', persona);
 
   const sharedBase = path.join(process.cwd(), 'container', 'AGENTS.md');
-  if (fs.existsSync(sharedBase)) {
+  if (includes.has('runtime') && fs.existsSync(sharedBase)) {
     pushSection('NanoClaw Runtime Contract', fs.readFileSync(sharedBase, 'utf-8'));
   }
 
-  pushSection('Memory System', MEMORY_POINTER);
-  pushSection('Native Runtime Skills', NATIVE_RUNTIME_SKILLS_POINTER);
+  if (includes.has('memory')) pushSection('Memory System', MEMORY_POINTER);
+  if (includes.has('skills')) pushSection('Native Runtime Skills', NATIVE_RUNTIME_SKILLS_POINTER);
 
   const cliDisabled = configRow?.cli_scope === 'disabled';
   const mcpToolsHostDir = path.join(process.cwd(), MCP_TOOLS_HOST_SUBPATH);
-  if (fs.existsSync(mcpToolsHostDir)) {
+  if (includes.has('modules') && fs.existsSync(mcpToolsHostDir)) {
     for (const entry of fs.readdirSync(mcpToolsHostDir).sort()) {
       const match = entry.match(/^(.+)\.instructions\.md$/);
       if (!match) continue;
@@ -92,7 +101,7 @@ export function composeGroupAgentsMd(group: AgentGroup, groupDir: string): void 
     }
   }
 
-  for (const [name, mcp] of Object.entries(mcpServers)) {
+  for (const [name, mcp] of includes.has('mcp') ? Object.entries(mcpServers) : []) {
     if (mcp.instructions) {
       pushSection(`MCP Server: ${name}`, mcp.instructions);
     }

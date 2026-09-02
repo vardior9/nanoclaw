@@ -29,8 +29,10 @@ import {
   ensureBareClone,
   fetchPrRefs,
   getBotUserId,
+  getCommitDelta,
   getPrDetail,
   getSlackThreadReplies,
+  getUnresolvedSelfReviewThreads,
   hasForeignActivity,
   injectCliEvent,
   isPendingVerdictMessage,
@@ -58,7 +60,7 @@ interface Args {
 
 const SLACK_NOTIFICATION_GATE =
   'Slack is silent by default. Do the review and GitHub writes without a Slack reply. ' +
-  'Send Slack only if Vardi personally must decide or act before you can proceed, or the PR is ready for its single final-verdict request. ' +
+  'Send Slack only if Vardi personally must decide or act before you can proceed or the PR is ready for its single final-verdict request. ' +
   'Findings and finding changes are GitHub-only.';
 
 function parseArgs(argv: string[]): Args {
@@ -101,17 +103,32 @@ function formatKickoffMessage(owner: string, repo: string, pr: PrDetail): string
   ].join('\n');
 }
 
-function formatReReviewMessage(owner: string, repo: string, pr: PrDetail): string {
+function formatReReviewMessage(
+  owner: string,
+  repo: string,
+  pr: PrDetail,
+  deltaContext: string,
+  unresolvedContext: string,
+): string {
   return [
     `New commits pushed to ${owner}/${repo}#${pr.number} — head is now ${pr.head.sha}.`,
     `Re-fetch into the existing worktree at ${containerWorktreePath(owner, repo, pr.number)} (bare clone: ${containerBarePath(owner, repo)}) and re-review.`,
+    '',
+    'This is a fresh model thread. The host-calculated continuation context below is authoritative; do not search old model transcripts.',
+    '',
+    deltaContext,
+    '',
+    'Unresolved review threads opened by this reviewer:',
+    unresolvedContext,
     SLACK_NOTIFICATION_GATE,
   ].join('\n');
 }
 
-function formatActivityMessage(owner: string, repo: string, pr: PrDetail): string {
+function formatActivityMessage(owner: string, repo: string, pr: PrDetail, activityContext: string): string {
   return [
     `New activity on ${owner}/${repo}#${pr.number} (comments/reviews, no new commits). Check whether a GitHub follow-up is warranted.`,
+    'This is a fresh model thread. Only the new external activity since the previous host checkpoint is included:',
+    activityContext || '(no external activity details)',
     SLACK_NOTIFICATION_GATE,
   ].join('\n');
 }
@@ -167,6 +184,7 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
   const newState: PrState = {
     thread_ts: pendingThread,
     head_sha: pr.head.sha,
+    pr_title: pr.title,
     base_ref: pr.base.ref,
     opened_at: new Date().toISOString(),
     last_nudge_at: null,
@@ -190,10 +208,23 @@ async function handlePush(key: string, ref: PrRef, pr: PrDetail, known: PrState,
     return; // keep existing state, retry next tick
   }
 
+  const delta = ctx.args.dryRun ? null : getCommitDelta(owner, repo, known.head_sha, pr.head.sha);
+  const threads = ctx.args.dryRun ? null : getUnresolvedSelfReviewThreads(owner, repo, pr.number, ctx.cfg.selfLogin);
+  const deltaContext = !delta
+    ? 'Commit delta would be calculated after fetch.'
+    : delta.ok
+      ? delta.context
+      : `Commit delta unavailable: ${delta.error}`;
+  const unresolvedContext = !threads
+    ? 'Unresolved reviewer threads would be fetched.'
+    : threads.ok
+      ? threads.context
+      : `Thread context unavailable: ${threads.error}`;
+
   try {
     await injectCliEvent(
       {
-        text: formatReReviewMessage(owner, repo, pr),
+        text: formatReReviewMessage(owner, repo, pr, deltaContext, unresolvedContext),
         to: reviewDestination(ctx.cfg, known.thread_ts),
         senderId: `slack:${ctx.cfg.ownerSlackId}`,
       },
@@ -205,7 +236,14 @@ async function handlePush(key: string, ref: PrRef, pr: PrDetail, known: PrState,
   }
 
   if (ctx.args.dryRun) return;
-  ctx.state[key] = { ...known, head_sha: pr.head.sha, last_nudge_at: null, nudges: 0, last_seen_updated_at: pr.updated_at };
+  ctx.state[key] = {
+    ...known,
+    head_sha: pr.head.sha,
+    pr_title: pr.title,
+    last_nudge_at: null,
+    nudges: 0,
+    last_seen_updated_at: pr.updated_at,
+  };
   saveState(ctx.state);
 }
 
@@ -220,14 +258,14 @@ async function handleActivity(key: string, ref: PrRef, pr: PrDetail, known: PrSt
       console.log(`[dry-run] ${key}: updated_at advanced but no foreign activity — would advance baseline silently`);
       return;
     }
-    ctx.state[key] = { ...known, last_seen_updated_at: pr.updated_at };
+    ctx.state[key] = { ...known, pr_title: pr.title, last_seen_updated_at: pr.updated_at };
     saveState(ctx.state);
     return;
   }
   try {
     await injectCliEvent(
       {
-        text: formatActivityMessage(ref.owner, ref.repo, pr),
+        text: formatActivityMessage(ref.owner, ref.repo, pr, activity.ok ? activity.context : ''),
         to: reviewDestination(ctx.cfg, known.thread_ts),
         senderId: `slack:${ctx.cfg.ownerSlackId}`,
       },
@@ -238,7 +276,7 @@ async function handleActivity(key: string, ref: PrRef, pr: PrDetail, known: PrSt
     return; // last_seen_updated_at left unchanged so we retry next tick
   }
   if (ctx.args.dryRun) return;
-  ctx.state[key] = { ...known, last_seen_updated_at: pr.updated_at };
+  ctx.state[key] = { ...known, pr_title: pr.title, last_seen_updated_at: pr.updated_at };
   saveState(ctx.state);
 }
 

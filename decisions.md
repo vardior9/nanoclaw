@@ -1,0 +1,4 @@
+- 2026-09-02: Model output is recommendation-only; a structured marker becomes a Slack card and an authorized host handler validates/submits against the stored exact SHA, eliminating model-invoked verdicts.
+- 2026-09-02: Reviewer runtime uses explicit `fresh` continuation and `focused` context profiles, selected at one config seam; this also makes daily memory consolidation a new Codex thread.
+- 2026-09-02: Re-review prompts are rebuilt from the old/new SHA delta plus unresolved reviewer-owned GitHub threads; activity prompts contain only external items since the host checkpoint.
+- 2026-09-02: Reviewer install disables `ncl`, caps prompt batches at four, and allowlists only `onecli-gateway`; model and effort remain `gpt-5.6-sol` / `medium`.

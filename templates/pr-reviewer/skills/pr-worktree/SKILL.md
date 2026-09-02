@@ -10,7 +10,7 @@ The host maintains a shared clone per repo under `/workspace/extra/repos/<owner>
 One command, idempotent (creates the worktree, or moves an existing one to the current head):
 
 ```bash
-bash /workspace/agent/.agents/skills/pr-worktree/bin/worktree.sh <owner>/<repo> <pr-number>
+bash /home/node/.agents/skills/pr-worktree/bin/worktree.sh <owner>/<repo> <pr-number>
 ```
 
 On success it prints two lines:

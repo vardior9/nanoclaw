@@ -9,12 +9,12 @@ timer** (`StartInterval 300`) — not a daemon.
 
 1. **Discovery** — `gh search/issues` for open PRs requesting review from
    `vardior9` in `org:apiiro`, minus anything labeled `apiiro-autofix`.
-2. **New PR** — posts a root Slack message in `#or-pr-reviewer`, ensures a
-   bare clone of the repo, fetches the PR's head + base refs, and injects a
-   kickoff message into NanoClaw (via the CLI channel's admin socket) so a
-   fresh per-thread session spawns to review it.
+2. **New PR** — ensures a bare clone, fetches the PR's head + base refs, and
+   injects a silent kickoff into a synthetic per-PR session. Slack materializes
+   only when a human question or final-verdict card is emitted.
 3. **Known PR** — detects new pushes (re-review), new activity without a
-   push (ping-pong nudge), overdue verdicts (one plain Slack reminder, no model
+   push (fresh exact-delta re-review), external activity (fresh bounded
+   ping-pong context), overdue verdicts (one plain Slack reminder, no model
    involvement), and closed/merged/review-request-cleared PRs (silent
    worktree cleanup + state drop).
 4. **GC** — LRU-evicts worktree checkouts over `MAX_WORKTREES_PER_REPO` /
@@ -28,18 +28,18 @@ treated as stale and broken.
 
 ## Files
 
-| Path | Purpose |
-|------|---------|
-| `scripts/pr-reviewer/lib.ts` | Shared helpers: config, state I/O, lock, `gh`/`git` wrappers, Slack Web API calls, CLI-socket injection |
-| `scripts/pr-reviewer/dispatch.ts` | The tick itself — run by launchd |
-| `scripts/pr-reviewer/install.ts` | One-time idempotent installer (mount + launchd plist) |
-| `scripts/pr-reviewer/tsconfig.json` | Standalone typecheck project (root `tsconfig.json` only covers `src/`) |
-| `launchd/com.nanoclaw.pr-dispatch.plist.template` | Rendered by `install.ts` into `~/Library/LaunchAgents/` |
+| Path                                              | Purpose                                                                                                 |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `scripts/pr-reviewer/lib.ts`                      | Shared helpers: config, state I/O, lock, `gh`/`git` wrappers, Slack Web API calls, CLI-socket injection |
+| `scripts/pr-reviewer/dispatch.ts`                 | The tick itself — run by launchd                                                                        |
+| `scripts/pr-reviewer/install.ts`                  | One-time idempotent installer (mount + launchd plist)                                                   |
+| `scripts/pr-reviewer/tsconfig.json`               | Standalone typecheck project (root `tsconfig.json` only covers `src/`)                                  |
+| `launchd/com.nanoclaw.pr-dispatch.plist.template` | Rendered by `install.ts` into `~/Library/LaunchAgents/`                                                 |
 
 ## Prerequisites
 
 - `gh` CLI installed and authenticated as the host operator (`gh auth
-  status`) — the dispatcher never uses a token from anywhere else.
+status`) — the dispatcher never uses a token from anywhere else.
 - `SLACK_BOT_TOKEN` in `.env`, with the bot in `#or-pr-reviewer` and the
   `channels:history` / `groups:history` scopes needed for
   `conversations.replies`.
@@ -77,12 +77,35 @@ makes directly on GitHub (rather than in the Slack thread) don't wake the
 agent either.
 
 The dispatcher only sends an overdue reminder when the latest bot message is
-an actual `Ready for final verdict` request. Routine lifecycle changes are
-logged and cleaned up without another Slack reply. Every dispatcher wake-up
-also repeats the strict agent notification gate: Slack is used only when Vardi
-must personally decide or act, or for the PR's single final-verdict request.
-Findings and finding changes stay on GitHub; review progress, CI, polling, and
-verdict-submission confirmations complete silently.
+an actual `Ready for final verdict` card. Routine lifecycle changes are logged
+and cleaned up without another Slack reply. Findings and finding changes stay
+on GitHub; review progress, CI, and polling complete silently.
+
+Every reviewer and memory-consolidation batch starts a fresh Codex thread. A
+re-review does not reconstruct chat history: the host deterministically supplies
+the old/new SHA delta and unresolved reviewer-owned GitHub threads. Same-head
+activity wakes include only external items since the last checkpoint.
+
+## Slack agent-session titles and resolution
+
+The Slack agent session's title is fixed the moment the session is created —
+`agents.sessions.setStatus` accepts a `title` only on the creating call and
+silently ignores it afterwards (it echoes the original back), and Slack rewrites
+characters it dislikes (`apiiro/lim#48766` is stored as `apiiro_lim_48766`). So
+the title identifies the PR and never carries review state: it is composed as
+`<repo> <number> <PR subject>`, reduced to the characters Slack keeps verbatim
+(`src/modules/pr-reviewer-agent-sessions/index.ts`). The subject comes from
+`pr_title` on each `state.json` entry — the dispatcher is the only host-side
+component that knows it, and entries written before that field existed fall
+back to `<repo> <number>`.
+
+The agent emits a recommendation marker, which delivery replaces with a Slack
+card. Button clicks are consumed by the host and never become model input. The
+host re-reads GitHub's current head, compares it with the stored reviewed SHA,
+and only then submits `APPROVE` or `REQUEST_CHANGES` with `gh`. A stale click is
+rejected and waits for the dispatcher's fresh re-review. Successful submission
+gets one host-written receipt and moves the session to `closed` (approval) or
+`active` (changes requested).
 
 ## Install
 
@@ -98,8 +121,10 @@ you've reviewed the generated plist at
 launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/com.nanoclaw.pr-dispatch.<slug>.plist
 ```
 
-Re-running `install.ts` is safe — every step (repos/ dir, mount merge,
-plist write) is idempotent.
+Re-running `install.ts` is safe. It also enforces the reviewer runtime profile:
+Sol/medium is left untouched, continuation is fresh, context is focused, `ncl`
+is disabled, batches are capped at four, and only the OneCLI gateway runtime
+skill is enabled alongside the template's two reviewer skills.
 
 ## Debugging
 

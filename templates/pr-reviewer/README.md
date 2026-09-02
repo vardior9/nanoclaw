@@ -13,7 +13,7 @@ pnpm run ncl -- groups create --template pr-reviewer
 pnpm run ncl -- groups config update --id <gid> --provider codex --model gpt-5.6-sol --effort medium
 ```
 
-Then: wire `#or-pr-reviewer` per-thread (see docs/pr-reviewer.md), run `scripts/pr-reviewer/install.ts --group <gid>` (RW mount + launchd job), resume the `consolidate-memory` task, and grant the group's OneCLI agent the GitHub PAT secret (NOT the `GitHub Git HTTPS` secret — the container must not do network git).
+Then: wire `#or-pr-reviewer` per-thread (see docs/pr-reviewer.md), run `scripts/pr-reviewer/install.ts --group <gid>` (RW mount, fresh/focused runtime policy, narrow skill allowlist, and launchd job), resume the `consolidate-memory` task, and grant the group's OneCLI agent the GitHub PAT secret (NOT the `GitHub Git HTTPS` secret — the container must not do network git).
 
 ## Deliberate deviations from upstream
 

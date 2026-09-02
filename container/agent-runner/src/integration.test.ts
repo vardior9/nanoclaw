@@ -5,7 +5,7 @@ import { getUndeliveredMessages } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import { getContinuation, setContinuation } from './db/session-state.js';
 import { MockProvider } from './providers/mock.js';
-import type { ProviderExchange } from './providers/types.js';
+import type { AgentQuery, ProviderExchange, QueryInput } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
 beforeEach(() => {
@@ -33,6 +33,45 @@ function insertMessage(id: string, content: object, opts?: { platformId?: string
 }
 
 describe('poll loop integration', () => {
+  it('starts every completed batch in a fresh provider thread when configured', async () => {
+    class RecordingProvider extends MockProvider {
+      readonly continuations: Array<string | undefined> = [];
+      override query(input: QueryInput): AgentQuery {
+        this.continuations.push(input.continuation);
+        return super.query(input);
+      }
+    }
+
+    setContinuation('mock', 'long-lived-thread');
+    insertMessage(
+      'm-fresh-1',
+      { sender: 'host', text: 'review head one' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+    const provider = new RecordingProvider({}, () => '<message to="discord-test">done</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoop({
+      provider,
+      providerName: 'mock',
+      continuationMode: 'fresh',
+      cwd: '/tmp',
+      signal: controller.signal,
+    });
+
+    await waitFor(() => getUndeliveredMessages().length === 1, 2000);
+    insertMessage(
+      'm-fresh-2',
+      { sender: 'host', text: 'review head two' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+    await waitFor(() => getUndeliveredMessages().length === 2, 2000);
+    controller.abort();
+
+    expect(provider.continuations).toEqual([undefined, undefined]);
+    expect(getContinuation('mock')).toBeUndefined();
+    await loopPromise;
+  });
+
   it('should pick up a message, process it, and write a response', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'What is the meaning of life?' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' });
 

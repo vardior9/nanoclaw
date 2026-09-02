@@ -249,6 +249,8 @@ export interface ContainerConfig {
   maxMessagesPerPrompt?: number;
   model?: string;
   effort?: string;
+  continuationMode?: 'resume' | 'fresh';
+  contextProfile?: 'standard' | 'focused';
   timezone?: string;
 }
 
@@ -329,6 +331,8 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
     model: row.model ?? undefined,
     effort: row.effort ?? undefined,
+    continuationMode: row.continuation_mode === 'fresh' ? 'fresh' : 'resume',
+    contextProfile: row.context_profile === 'focused' ? 'focused' : 'standard',
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
   };
 }

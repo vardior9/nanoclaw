@@ -72,6 +72,8 @@ export interface PollLoopConfig {
    * resurrect a stale id from a different backend.
    */
   providerName: string;
+  /** Whether provider threads survive across completed message batches. */
+  continuationMode?: 'resume' | 'fresh';
   cwd: string;
   systemContext?: {
     instructions?: string;
@@ -100,7 +102,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // provider decides how to use it (Claude resumes a .jsonl transcript,
   // other providers may reload a thread ID, etc.). Keyed per-provider so
   // a Codex thread id never gets handed to Claude or vice versa.
-  let continuation: string | undefined = migrateLegacyContinuation(config.providerName);
+  let continuation: string | undefined =
+    config.continuationMode === 'fresh' ? undefined : migrateLegacyContinuation(config.providerName);
+
+  if (config.continuationMode === 'fresh') clearContinuation(config.providerName);
 
   // Before resuming, drop a session whose on-disk transcript has grown too
   // large/old to cold-resume within the host's idle ceiling. Without this a
@@ -273,10 +278,16 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         prompt,
         continuation,
         config.provider.emitsMidTurnText === true,
+        config.continuationMode !== 'fresh',
       );
       if (result.continuation && result.continuation !== continuation) {
-        continuation = result.continuation;
-        setContinuation(config.providerName, continuation);
+        if (config.continuationMode === 'fresh') {
+          continuation = undefined;
+          clearContinuation(config.providerName);
+        } else {
+          continuation = result.continuation;
+          setContinuation(config.providerName, continuation);
+        }
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -373,6 +384,8 @@ export async function processQuery(
    * delivery-inert and the final result stays the single delivery door.
    */
   emitsMidTurnText = false,
+  /** Keep the provider stream open for later messages and persist its continuation. */
+  keepAlive = true,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -558,7 +571,7 @@ export async function processQuery(
         // container died between `init` and `result`, the SDK session was
         // effectively orphaned and the next message started a blank
         // Claude session with no prior context.
-        setContinuation(providerName, event.continuation);
+        if (keepAlive) setContinuation(providerName, event.continuation);
       } else if (event.type === 'text') {
         // Assistant text emitted mid-turn (e.g. between tool calls). The
         // final result only carries the LAST assistant text, so complete
@@ -573,6 +586,7 @@ export async function processQuery(
           midTurnTail = scan.tail;
         }
       } else if (event.type === 'result') {
+        let retryScheduled = false;
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
         // stale 'processing' claims while the query stays open for
@@ -631,6 +645,7 @@ export async function processQuery(
               status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
             });
             if (willRetryWrapping) {
+              retryScheduled = true;
               unwrappedNudged = true;
               const destinations = getAllDestinations();
               const names = destinations.map((d) => d.name).join(', ');
@@ -642,6 +657,7 @@ export async function processQuery(
               );
             }
             if (willRetryTaskBlocks) {
+              retryScheduled = true;
               taskBlockNudged = true;
               const names = getAllDestinations()
                 .map((d) => d.name)
@@ -666,6 +682,7 @@ export async function processQuery(
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
+        if (!keepAlive && !retryScheduled) query.end();
       }
     }
   } catch (err) {
@@ -1067,7 +1084,9 @@ export function dispatchResultText(
       if (options.turnDelivered) {
         log(`<message to="${toName}"> in final result after a same-turn delivery — repeat, result door does not send`);
       } else {
-        log(`<message to="${toName}"> in final result but nothing was delivered this turn — nudging for a mid-turn resend`);
+        log(
+          `<message to="${toName}"> in final result but nothing was delivered this turn — nudging for a mid-turn resend`,
+        );
         scratchpadParts.push(`[not delivered — the result door does not send; to="${toName}"] ${body}`);
       }
       continue;

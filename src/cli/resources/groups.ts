@@ -65,6 +65,8 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     packages_npm: JSON.parse(row.packages_npm),
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
+    continuation_mode: row.continuation_mode ?? 'resume',
+    context_profile: row.context_profile ?? 'standard',
     timezone: row.timezone,
     updated_at: row.updated_at,
   };
@@ -335,7 +337,7 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --continuation-mode, --context-profile, ' +
         '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
       handler: async (args) => {
         const id = args.id as string;
@@ -353,6 +355,8 @@ registerResource({
             | 'assistant_name'
             | 'max_messages_per_prompt'
             | 'cli_scope'
+            | 'continuation_mode'
+            | 'context_profile'
             | 'timezone'
           >
         > = {};
@@ -372,10 +376,21 @@ registerResource({
           }
           updates.cli_scope = scope;
         }
+        if (args.continuation_mode !== undefined) {
+          const mode = String(args.continuation_mode);
+          if (!['resume', 'fresh'].includes(mode)) throw new Error('--continuation-mode must be resume or fresh');
+          updates.continuation_mode = mode;
+        }
+        if (args.context_profile !== undefined) {
+          const profile = String(args.context_profile);
+          if (!['standard', 'focused'].includes(profile))
+            throw new Error('--context-profile must be standard or focused');
+          updates.context_profile = profile;
+        }
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --continuation-mode, --context-profile, --timezone',
           );
         }
 

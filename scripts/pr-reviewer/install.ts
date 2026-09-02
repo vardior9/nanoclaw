@@ -22,7 +22,11 @@ import os from 'os';
 import path from 'path';
 
 import { getAgentGroup } from '../../src/db/agent-groups.js';
-import { getContainerConfig, updateContainerConfigJson } from '../../src/db/container-configs.js';
+import {
+  getContainerConfig,
+  updateContainerConfigJson,
+  updateContainerConfigScalars,
+} from '../../src/db/container-configs.js';
 import { initDb, runMigrations } from '../../src/db/index.js';
 import type { AdditionalMountConfig } from '../../src/container-config.js';
 import { getInstallSlug } from '../../src/install-slug.js';
@@ -110,7 +114,7 @@ function verifyMountAllowlist(): void {
 }
 
 /** Merge (never clobber) the repos/ RW mount into the group's container config. */
-function installMount(groupId: string): void {
+function installReviewerRuntime(groupId: string): void {
   const dbPath = path.join(PROJECT_ROOT, 'data', 'v2.db');
   const db = initDb(dbPath);
   runMigrations(db);
@@ -121,7 +125,9 @@ function installMount(groupId: string): void {
   }
   const row = getContainerConfig(groupId);
   if (!row) {
-    fail(`no container_configs row for group "${groupId}" — it needs to spawn at least once (or run \`ncl groups config get --id ${groupId}\`) before this can merge a mount.`);
+    fail(
+      `no container_configs row for group "${groupId}" — it needs to spawn at least once (or run \`ncl groups config get --id ${groupId}\`) before this can merge a mount.`,
+    );
   }
 
   const existing = JSON.parse(row!.additional_mounts) as AdditionalMountConfig[];
@@ -132,8 +138,22 @@ function installMount(groupId: string): void {
   } else {
     existing.push(mount);
     updateContainerConfigJson(groupId, 'additional_mounts', existing);
-    console.log(`added mount ${JSON.stringify(mount)} to group ${groupId} (run \`ncl groups restart --id ${groupId}\` to apply)`);
+    console.log(
+      `added mount ${JSON.stringify(mount)} to group ${groupId} (run \`ncl groups restart --id ${groupId}\` to apply)`,
+    );
   }
+
+  // Reviewer turns are disposable jobs, not a general assistant conversation.
+  // Keep the GitHub gateway skill, omit unrelated runtime skills/instructions,
+  // and never hand a prior provider continuation to the next event or task run.
+  updateContainerConfigJson(groupId, 'skills', ['onecli-gateway']);
+  updateContainerConfigScalars(groupId, {
+    continuation_mode: 'fresh',
+    context_profile: 'focused',
+    cli_scope: 'disabled',
+    max_messages_per_prompt: 4,
+  });
+  console.log(`configured group ${groupId} for fresh, focused reviewer turns`);
 }
 
 function installLaunchdPlist(): string {
@@ -168,7 +188,7 @@ function main(): void {
 
   ensureReposDir();
   verifyMountAllowlist();
-  installMount(group!);
+  installReviewerRuntime(group!);
   const plistPath = installLaunchdPlist();
 
   const uid = typeof process.getuid === 'function' ? process.getuid() : '$(id -u)';

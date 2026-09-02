@@ -18,7 +18,11 @@ vi.mock('../config.js', async (importOriginal) => ({
 
 import { composeGroupAgentsMd, CODEX_PROJECT_DOC_MAX_BYTES } from './codex-agents-md.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../db/index.js';
-import { ensureContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
+import {
+  ensureContainerConfig,
+  updateContainerConfigJson,
+  updateContainerConfigScalars,
+} from '../db/container-configs.js';
 import { PERSONA_PREPEND_FILE } from '../group-persona.js';
 import type { AgentGroup } from '../types.js';
 
@@ -63,6 +67,26 @@ describe('composeGroupAgentsMd cap handling', () => {
       expect(doc).toContain('linked memory files');
       expect(doc).not.toContain('memories, data');
       expect(Buffer.byteLength(doc, 'utf-8')).toBeLessThanOrEqual(CODEX_PROJECT_DOC_MAX_BYTES);
+    } finally {
+      fs.rmSync(groupDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps only task-facing sections in the focused profile', () => {
+    const g = group('focused');
+    createAgentGroup(g);
+    ensureContainerConfig(g.id);
+    updateContainerConfigScalars(g.id, { context_profile: 'focused' });
+    const groupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-md-'));
+    try {
+      fs.writeFileSync(path.join(groupDir, PERSONA_PREPEND_FILE), 'Review only the assigned PR.\n');
+      composeGroupAgentsMd(g, groupDir);
+      const doc = fs.readFileSync(path.join(groupDir, 'AGENTS.md'), 'utf-8');
+      expect(doc).toContain('# Persona');
+      expect(doc).toContain('# Memory System');
+      expect(doc).toContain('# Native Runtime Skills');
+      expect(doc).not.toContain('# NanoClaw Runtime Contract');
+      expect(doc).not.toContain('# NanoClaw Module:');
     } finally {
       fs.rmSync(groupDir, { recursive: true, force: true });
     }

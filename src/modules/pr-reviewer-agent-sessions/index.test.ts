@@ -1,3 +1,7 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDb, getDb, initTestDb } from '../../db/connection.js';
@@ -7,8 +11,10 @@ import type { Session } from '../../types.js';
 import {
   deliverPendingReviewerAgentSession,
   findReviewerSessionByAlias,
+  handleReviewerVerdict,
   pendingReviewerThreadId,
   prKeyFromPendingThread,
+  reviewerSessionTitle,
 } from './index.js';
 
 const session: Session = {
@@ -74,6 +80,31 @@ function fakeAdapter() {
   return { adapter, counts: () => ({ rootCalls, threadCalls }) };
 }
 
+describe('reviewer agent session titles', () => {
+  it('identifies the PR by repo, number and subject', () => {
+    expect(reviewerSessionTitle('apiiro/lim#48766', 'Batch the per-artifact reads')).toBe(
+      'lim 48766 Batch the per-artifact reads',
+    );
+  });
+
+  it('falls back to repo and number when the PR title is unknown', () => {
+    expect(reviewerSessionTitle('apiiro/lim#48766', null)).toBe('lim 48766');
+  });
+
+  it('reduces the title to characters Slack keeps verbatim', () => {
+    // Slack stored `apiiro/lim#48766` as `apiiro_lim_48766`; anything it would
+    // rewrite must be gone before we hand the title over.
+    expect(reviewerSessionTitle('apiiro/lim#48766', '[LIM-1234] fix `parse()` — a/b (#9)')).toBe(
+      'lim 48766 LIM-1234 fix parse a b 9',
+    );
+  });
+
+  it('caps the title so Slack never truncates it for us', () => {
+    const title = reviewerSessionTitle('apiiro/lim#48766', 'x'.repeat(400));
+    expect(title.length).toBe(120);
+  });
+});
+
 describe('reviewer action-only agent sessions', () => {
   it('round-trips the PR key in a synthetic thread id', () => {
     expect(prKeyFromPendingThread(session.thread_id)).toBe('apiiro/guardian#123');
@@ -91,7 +122,7 @@ describe('reviewer action-only agent sessions', () => {
       'slack:DOWNER:1788000000.123456',
       'suspended',
       'slack',
-      expect.objectContaining({ title: 'apiiro/guardian#123 - human signoff' }),
+      expect.objectContaining({ title: 'guardian 123' }),
     );
     expect(findReviewerSessionByAlias('ag-reviewer', 'mg-dm', 'slack:DOWNER:1788000000.123456')?.id).toBe(session.id);
   });
@@ -109,6 +140,122 @@ describe('reviewer action-only agent sessions', () => {
     expect(getDb().prepare('SELECT status_created_at FROM reviewer_agent_session_aliases').get()).toEqual({
       status_created_at: expect.any(String),
     });
+  });
+
+  it('turns a structured recommendation into a host-owned Slack card', async () => {
+    const { adapter } = fakeAdapter();
+    const signal = {
+      ...msg,
+      content: JSON.stringify({
+        text:
+          'PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"0123456789abcdef0123456789abcdef01234567"}\n' +
+          '<@U010NV4PV29> Ready for final verdict\nhttps://github.com/apiiro/guardian/pull/123',
+      }),
+    };
+
+    await deliverPendingReviewerAgentSession(signal, session, adapter);
+
+    const delivery = vi.mocked(adapter.deliver).mock.calls[0];
+    expect(delivery[3]).toBe('chat-sdk');
+    expect(JSON.parse(String(delivery[4]))).toMatchObject({
+      type: 'ask_question',
+      title: 'Final PR verdict',
+      options: expect.arrayContaining([expect.objectContaining({ value: 'APPROVE' })]),
+    });
+    expect(getDb().prepare('SELECT pr_key, head_sha, recommendation FROM reviewer_verdict_requests').get()).toEqual({
+      pr_key: 'apiiro/guardian#123',
+      head_sha: '0123456789abcdef0123456789abcdef01234567',
+      recommendation: 'APPROVE',
+    });
+  });
+
+  it('handles Hold entirely on the host without writing an agent message', async () => {
+    const { adapter, counts } = fakeAdapter();
+    const signal = {
+      ...msg,
+      content: JSON.stringify({
+        text: 'PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"0123456789abcdef0123456789abcdef01234567"}\nReady',
+      }),
+    };
+    await deliverPendingReviewerAgentSession(signal, session, adapter);
+    const row = getDb().prepare('SELECT question_id FROM reviewer_verdict_requests').get() as { question_id: string };
+
+    await expect(
+      handleReviewerVerdict({
+        questionId: row.question_id,
+        value: 'HOLD',
+        userId: 'U010NV4PV29',
+        channelType: 'slack',
+        platformId: '',
+        threadId: null,
+      }),
+    ).resolves.toBe(true);
+
+    expect(getDb().prepare('SELECT COUNT(*) AS n FROM reviewer_verdict_requests').get()).toEqual({ n: 0 });
+    expect(counts()).toEqual({ rootCalls: 1, threadCalls: 0 });
+  });
+
+  it('submits an approved card on the host with the exact reviewed commit', async () => {
+    const { adapter } = fakeAdapter();
+    const head = '0123456789abcdef0123456789abcdef01234567';
+    await deliverPendingReviewerAgentSession(
+      {
+        ...msg,
+        content: JSON.stringify({
+          text: `PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"${head}"}\nReady`,
+        }),
+      },
+      session,
+      adapter,
+    );
+    const row = getDb().prepare('SELECT question_id FROM reviewer_verdict_requests').get() as { question_id: string };
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-gh-'));
+    const logPath = path.join(bin, 'calls.log');
+    const ghPath = path.join(bin, 'gh');
+    fs.writeFileSync(
+      ghPath,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$FAKE_GH_LOG"\ncase "$*" in\n  *"--jq .head.sha"*) printf '${head}\\n' ;;\n  *) printf '{}\\n' ;;\nesac\n`,
+      { mode: 0o755 },
+    );
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath}`;
+    process.env.FAKE_GH_LOG = logPath;
+    try {
+      await expect(
+        handleReviewerVerdict({
+          questionId: row.question_id,
+          value: 'APPROVE',
+          userId: 'U010NV4PV29',
+          channelType: 'slack',
+          platformId: '',
+          threadId: null,
+        }),
+      ).resolves.toBe(true);
+      const calls = fs.readFileSync(logPath, 'utf8');
+      expect(calls).toContain(`event=APPROVE -f commit_id=${head}`);
+      expect(getDb().prepare('SELECT COUNT(*) AS n FROM reviewer_verdict_requests').get()).toEqual({ n: 0 });
+    } finally {
+      process.env.PATH = oldPath;
+      delete process.env.FAKE_GH_LOG;
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves an ordinary message awaiting the human', async () => {
+    const { adapter } = fakeAdapter();
+    await deliverPendingReviewerAgentSession(msg, session, adapter);
+    const later = { ...msg, id: 'out-2', content: JSON.stringify({ text: 'Verdict submitted soon?' }) };
+
+    await deliverPendingReviewerAgentSession(later, session, adapter);
+
+    expect(adapter.setAgentSessionStatus).toHaveBeenLastCalledWith(
+      'slack',
+      'slack:DOWNER',
+      'slack:DOWNER:1788000000.123456',
+      'suspended',
+      'slack',
+      undefined,
+    );
   });
 
   it('delivers later output inside the materialized agent session', async () => {

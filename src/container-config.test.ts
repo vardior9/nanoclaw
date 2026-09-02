@@ -63,6 +63,17 @@ describe('resolveGroupTimezone', () => {
     updateContainerConfigScalars(GROUP.id, { timezone: 'Not/AZone' });
     expect(configFromDb(getContainerConfig(GROUP.id)!, GROUP).timezone).toBeUndefined();
   });
+
+  it('materializes explicit fresh/focused runtime policies and safe defaults', () => {
+    const defaults = configFromDb(getContainerConfig(GROUP.id)!, GROUP);
+    expect(defaults.continuationMode).toBe('resume');
+    expect(defaults.contextProfile).toBe('standard');
+
+    updateContainerConfigScalars(GROUP.id, { continuation_mode: 'fresh', context_profile: 'focused' });
+    const focused = configFromDb(getContainerConfig(GROUP.id)!, GROUP);
+    expect(focused.continuationMode).toBe('fresh');
+    expect(focused.contextProfile).toBe('focused');
+  });
 });
 
 describe('parseMcpServerConfig', () => {
