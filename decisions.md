@@ -5,3 +5,4 @@
 - 2026-09-02: Verdict clicks follow one host-owned pending state machine; the host resolves `gh` outside launchd PATH, rejects stale or closed PR state, and clears pending rows when a session closes.
 - 2026-09-02: Slack-card content is destination-wrapped, mention-free, and uses bare URLs; empty-body third-party APPROVED events are host-suppressed because they require no reviewer follow-up.
 - 2026-09-02: Closed PRs retain verdict-card render metadata; late clicks resolve as expired host-side instead of leaking a raw option index or waking the model.
+- 2026-09-03: Verdict rows are an explicit host state machine with one active exact-head card; only known green-CI summaries may advance silently while that card is pending, preserving human and finding-bearing activity.

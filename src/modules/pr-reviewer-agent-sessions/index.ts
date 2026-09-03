@@ -37,6 +37,15 @@ const TABLE = 'reviewer_agent_session_aliases';
 const VERDICTS_TABLE = 'reviewer_verdict_requests';
 const PENDING_MARKER = 'pending-pr-';
 const VERDICT_PREFIX = 'PR_REVIEW_VERDICT ';
+type VerdictTerminalReason = 'superseded' | 'stale-head' | 'held' | 'applied' | 'closed';
+
+const TERMINAL_LABEL: Record<VerdictTerminalReason, string> = {
+  superseded: 'Expired — newer verdict available',
+  'stale-head': 'Expired — newer head available',
+  held: 'Held',
+  applied: 'Already resolved',
+  closed: 'Expired — PR already closed',
+};
 
 interface AliasRow {
   session_id: string;
@@ -69,6 +78,9 @@ interface VerdictRequestRow {
   question: string;
   options_json: string;
   created_at: string;
+  platform_message_id: string | null;
+  terminal_reason: VerdictTerminalReason | null;
+  resolved_at: string | null;
   closed_at: string | null;
 }
 
@@ -125,6 +137,24 @@ registerMigration({
        WHERE session_id IN (
          SELECT session_id FROM ${TABLE} WHERE closed_at IS NOT NULL
        );
+    `);
+  },
+});
+
+registerMigration({
+  version: 4,
+  name: 'module:pr-reviewer-agent-sessions:verdict-lifecycle',
+  up(db: Database.Database) {
+    db.exec(`
+      ALTER TABLE ${VERDICTS_TABLE} ADD COLUMN platform_message_id TEXT;
+      ALTER TABLE ${VERDICTS_TABLE} ADD COLUMN terminal_reason TEXT;
+      ALTER TABLE ${VERDICTS_TABLE} ADD COLUMN resolved_at TEXT;
+      UPDATE ${VERDICTS_TABLE}
+         SET terminal_reason = 'closed', resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+       WHERE session_id IN (SELECT session_id FROM ${TABLE} WHERE closed_at IS NOT NULL);
+      DROP INDEX idx_reviewer_verdict_one_per_head;
+      CREATE UNIQUE INDEX idx_reviewer_verdict_one_active_per_head
+        ON ${VERDICTS_TABLE}(pr_key, head_sha) WHERE terminal_reason IS NULL;
     `);
   },
 });
@@ -251,32 +281,72 @@ function aliasForSession(sessionId: string): AliasRow | undefined {
   return getDb().prepare(`SELECT * FROM ${TABLE} WHERE session_id = ?`).get(sessionId) as AliasRow | undefined;
 }
 
-function prepareVerdictRequest(session: Session, key: string, msg: DeliverableMessage, signal: VerdictSignal): string {
+interface PreparedVerdictRequest {
+  questionId: string;
+  platformMessageId: string | null;
+  superseded: Array<{ platformMessageId: string; title: string; question: string }>;
+}
+
+function prepareVerdictRequest(
+  session: Session,
+  key: string,
+  msg: DeliverableMessage,
+  signal: VerdictSignal,
+): PreparedVerdictRequest {
   const existing = getDb()
-    .prepare(`SELECT question_id FROM ${VERDICTS_TABLE} WHERE pr_key = ? AND head_sha = ?`)
-    .get(key, signal.headSha) as { question_id: string } | undefined;
-  if (existing) return existing.question_id;
+    .prepare(
+      `SELECT question_id, platform_message_id FROM ${VERDICTS_TABLE}
+        WHERE pr_key = ? AND head_sha = ? AND terminal_reason IS NULL`,
+    )
+    .get(key, signal.headSha) as { question_id: string; platform_message_id: string | null } | undefined;
+  if (existing) {
+    return { questionId: existing.question_id, platformMessageId: existing.platform_message_id, superseded: [] };
+  }
 
   const questionId = `prv-${createHash('sha256').update(`${session.id}:${msg.id}`).digest('hex').slice(0, 24)}`;
   const options = normalizeOptions(VERDICT_OPTIONS);
-  getDb()
+  const now = new Date().toISOString();
+  const superseded = getDb()
     .prepare(
-      `INSERT INTO ${VERDICTS_TABLE}
-        (question_id, session_id, pr_key, head_sha, recommendation, title, question, options_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `SELECT platform_message_id, title, question FROM ${VERDICTS_TABLE}
+        WHERE pr_key = ? AND terminal_reason IS NULL AND platform_message_id IS NOT NULL`,
     )
-    .run(
-      questionId,
-      session.id,
-      key,
-      signal.headSha,
-      signal.recommendation,
-      'Final PR verdict',
-      signal.question,
-      JSON.stringify(options),
-      new Date().toISOString(),
-    );
-  return questionId;
+    .all(key) as Array<{ platform_message_id: string; title: string; question: string }>;
+  getDb().transaction(() => {
+    getDb()
+      .prepare(
+        `UPDATE ${VERDICTS_TABLE}
+            SET terminal_reason = 'superseded', resolved_at = ?
+          WHERE pr_key = ? AND terminal_reason IS NULL`,
+      )
+      .run(now, key);
+    getDb()
+      .prepare(
+        `INSERT INTO ${VERDICTS_TABLE}
+          (question_id, session_id, pr_key, head_sha, recommendation, title, question, options_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        questionId,
+        session.id,
+        key,
+        signal.headSha,
+        signal.recommendation,
+        'Final PR verdict',
+        signal.question,
+        JSON.stringify(options),
+        now,
+      );
+  })();
+  return {
+    questionId,
+    platformMessageId: null,
+    superseded: superseded.map((row) => ({
+      platformMessageId: row.platform_message_id,
+      title: row.title,
+      question: row.question,
+    })),
+  };
 }
 
 function verdictCard(questionId: string, signal: VerdictSignal): string {
@@ -326,9 +396,49 @@ export async function deliverPendingReviewerAgentSession(
   let alias = aliasForSession(session.id);
   let platformMessageId: string | undefined;
   const signal = verdictSignal(msg.content);
-  const questionId = signal ? prepareVerdictRequest(session, key, msg, signal) : null;
+  const prepared = signal ? prepareVerdictRequest(session, key, msg, signal) : null;
+  const questionId = prepared?.questionId ?? null;
   const deliveredKind = signal ? 'chat-sdk' : msg.kind;
   const deliveredContent = signal && questionId ? verdictCard(questionId, signal) : msg.content;
+
+  if (prepared?.platformMessageId) {
+    log.info('Reviewer verdict card already active for exact head', {
+      sessionId: session.id,
+      key,
+      headSha: signal?.headSha,
+    });
+    return { handled: true, platformMessageId: prepared.platformMessageId };
+  }
+
+  if (alias && prepared?.superseded.length) {
+    for (const old of prepared.superseded) {
+      try {
+        await adapter.deliver(
+          channelType,
+          platformId,
+          alias.alias_thread_id,
+          'chat-sdk',
+          JSON.stringify({
+            operation: 'edit',
+            messageId: old.platformMessageId,
+            terminalCard: {
+              title: old.title,
+              question: old.question,
+              resolution: 'Expired — newer verdict available',
+            },
+          }),
+          undefined,
+          mg.instance,
+        );
+      } catch (err) {
+        log.warn('Could not visually expire superseded reviewer verdict card', {
+          key,
+          platformMessageId: old.platformMessageId,
+          err,
+        });
+      }
+    }
+  }
 
   if (!alias) {
     platformMessageId = await adapter.deliver(
@@ -378,6 +488,12 @@ export async function deliverPendingReviewerAgentSession(
     );
   }
 
+  if (questionId && platformMessageId) {
+    getDb()
+      .prepare(`UPDATE ${VERDICTS_TABLE} SET platform_message_id = ? WHERE question_id = ?`)
+      .run(platformMessageId, questionId);
+  }
+
   const ownerSlackId = readEnvFile(['PR_OWNER_SLACK_ID']).PR_OWNER_SLACK_ID || 'U010NV4PV29';
   await adapter.setAgentSessionStatus(
     channelType,
@@ -417,12 +533,15 @@ registerQuestionRenderResolver((questionId) => {
   const request = verdictRequest(questionId);
   if (!request) return undefined;
   const options = JSON.parse(request.options_json) as ReturnType<typeof normalizeOptions>;
+  const terminalLabel = request.closed_at
+    ? TERMINAL_LABEL.closed
+    : request.terminal_reason
+      ? TERMINAL_LABEL[request.terminal_reason]
+      : null;
   return {
     title: request.title,
     question: request.question,
-    options: request.closed_at
-      ? options.map((option) => ({ ...option, selectedLabel: 'Expired — PR already closed' }))
-      : options,
+    options: terminalLabel ? options.map((option) => ({ ...option, selectedLabel: terminalLabel })) : options,
   };
 });
 
@@ -490,7 +609,7 @@ async function redeliverVerdictCard(request: VerdictRequestRow): Promise<void> {
 export async function handleReviewerVerdict(payload: ResponsePayload): Promise<boolean> {
   const request = verdictRequest(payload.questionId);
   if (!request) return false;
-  if (request.closed_at) {
+  if (request.closed_at || request.terminal_reason) {
     log.info('Ignoring expired reviewer verdict click', { questionId: payload.questionId, pr: request.pr_key });
     return true;
   }
@@ -506,7 +625,9 @@ export async function handleReviewerVerdict(payload: ResponsePayload): Promise<b
   }
 
   if (payload.value === 'HOLD') {
-    getDb().prepare(`DELETE FROM ${VERDICTS_TABLE} WHERE question_id = ?`).run(payload.questionId);
+    getDb()
+      .prepare(`UPDATE ${VERDICTS_TABLE} SET terminal_reason = 'held', resolved_at = ? WHERE question_id = ?`)
+      .run(new Date().toISOString(), payload.questionId);
     return true;
   }
   if (payload.value !== 'APPROVE' && payload.value !== 'REQUEST_CHANGES') {
@@ -523,7 +644,9 @@ export async function handleReviewerVerdict(payload: ResponsePayload): Promise<b
     ).split('\t');
     if (!currentHead || !state || !merged) throw new Error('GitHub returned incomplete PR state');
     if (state !== 'open' || merged === 'true') {
-      getDb().prepare(`DELETE FROM ${VERDICTS_TABLE} WHERE question_id = ?`).run(payload.questionId);
+      getDb()
+        .prepare(`UPDATE ${VERDICTS_TABLE} SET terminal_reason = 'closed', resolved_at = ? WHERE question_id = ?`)
+        .run(new Date().toISOString(), payload.questionId);
       await deliverVerdictMessage(
         request,
         `ℹ️ Verdict not submitted: ${url} is already ${merged === 'true' ? 'merged' : state}.`,
@@ -549,7 +672,9 @@ export async function handleReviewerVerdict(payload: ResponsePayload): Promise<b
       return true;
     }
     if (currentHead !== request.head_sha) {
-      getDb().prepare(`DELETE FROM ${VERDICTS_TABLE} WHERE question_id = ?`).run(payload.questionId);
+      getDb()
+        .prepare(`UPDATE ${VERDICTS_TABLE} SET terminal_reason = 'stale-head', resolved_at = ? WHERE question_id = ?`)
+        .run(new Date().toISOString(), payload.questionId);
       await deliverVerdictMessage(
         request,
         `⚠️ Verdict not submitted: the reviewed head was \`${request.head_sha.slice(0, 12)}\`, but GitHub is now at \`${currentHead.slice(0, 12)}\`. A fresh re-review will run.`,
@@ -570,7 +695,9 @@ export async function handleReviewerVerdict(payload: ResponsePayload): Promise<b
       '-f',
       `body=${body}`,
     ]);
-    getDb().prepare(`DELETE FROM ${VERDICTS_TABLE} WHERE question_id = ?`).run(payload.questionId);
+    getDb()
+      .prepare(`UPDATE ${VERDICTS_TABLE} SET terminal_reason = 'applied', resolved_at = ? WHERE question_id = ?`)
+      .run(new Date().toISOString(), payload.questionId);
     await deliverVerdictMessage(request, `✅ Verdict submitted: ${payload.value} — [${url}](${url})`);
 
     const alias = aliasForSession(request.session_id);

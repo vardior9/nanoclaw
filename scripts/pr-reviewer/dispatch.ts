@@ -34,6 +34,7 @@ import {
   getSlackThreadReplies,
   getUnresolvedSelfReviewThreads,
   hasForeignActivity,
+  hasPendingExactHeadVerdict,
   injectCliEvent,
   isPendingVerdictMessage,
   latestSelfReviewState,
@@ -51,6 +52,7 @@ import {
   searchOpenPRs,
   reviewDestination,
   setMaterializedAgentSessionStatus,
+  terminalizeSupersededVerdicts,
 } from './lib.js';
 
 interface Args {
@@ -262,6 +264,15 @@ async function handleActivity(key: string, ref: PrRef, pr: PrDetail, known: PrSt
     saveState(ctx.state);
     return;
   }
+  if (activity.ok && activity.nonActionableAutomationOnly && hasPendingExactHeadVerdict(key, pr.head.sha)) {
+    if (ctx.args.dryRun) {
+      console.log(`[dry-run] ${key}: exact-head verdict pending; would ignore repeated green CI summary`);
+      return;
+    }
+    ctx.state[key] = { ...known, pr_title: pr.title, last_seen_updated_at: pr.updated_at };
+    saveState(ctx.state);
+    return;
+  }
   try {
     await injectCliEvent(
       {
@@ -396,6 +407,8 @@ async function processPr(key: string, isDiscovered: boolean, ctx: TickCtx): Prom
     // COMMENT / REQUEST_CHANGES / DISMISSED — fall through, keep tracking.
   }
   if (pr.draft) return; // became draft mid-review — leave state untouched
+
+  if (!ctx.args.dryRun) await terminalizeSupersededVerdicts(ctx.cfg, key, pr.head.sha);
 
   if (pr.head.sha !== known.head_sha) {
     await handlePush(key, ref, pr, known, ctx);

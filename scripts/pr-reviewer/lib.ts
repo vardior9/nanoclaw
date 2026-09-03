@@ -301,9 +301,11 @@ export function hasForeignActivity(
   number: number,
   sinceIso: string,
   selfLogin: string,
-): { ok: true; foreign: boolean; context: string } | { ok: false; error: string } {
+):
+  | { ok: true; foreign: boolean; nonActionableAutomationOnly: boolean; context: string }
+  | { ok: false; error: string } {
   interface Authored {
-    user?: { login?: string } | null;
+    user?: { login?: string; type?: string } | null;
     submitted_at?: string;
     created_at?: string;
     body?: string;
@@ -312,6 +314,9 @@ export function hasForeignActivity(
     line?: number | null;
     html_url?: string;
   }
+  const isNonActionableAutomation = (item: Authored): boolean =>
+    item.user?.login === 'apiirobot' &&
+    /^:green_circle:\s+\*\*Feature-branch CI passed\.\*\*/.test(item.body?.trim() ?? '');
   const foreignIn = (items: Authored[], after?: boolean): Authored[] =>
     items.filter(
       (item) =>
@@ -344,9 +349,78 @@ export function hasForeignActivity(
         return `- ${item.user?.login} at ${where}: ${body}${item.html_url ? ` (${item.html_url})` : ''}`;
       })
       .join('\n');
-    return { ok: true, foreign: items.length > 0, context };
+    return {
+      ok: true,
+      foreign: items.length > 0,
+      nonActionableAutomationOnly: items.length > 0 && items.every(isNonActionableAutomation),
+      context,
+    };
   } catch (err) {
     return { ok: false, error: `unparseable gh response: ${String(err)}` };
+  }
+}
+
+/** True when the host is already waiting on the owner for this exact reviewed head. */
+export function hasPendingExactHeadVerdict(prKey: string, headSha: string): boolean {
+  const db = new Database(path.join(DATA_DIR, 'v2.db'), { readonly: true, fileMustExist: true });
+  try {
+    return Boolean(
+      db
+        .prepare(
+          `SELECT 1
+             FROM reviewer_verdict_requests v
+             JOIN reviewer_agent_session_aliases a ON a.session_id = v.session_id
+            WHERE v.pr_key = ? AND v.head_sha = ?
+              AND v.terminal_reason IS NULL AND a.closed_at IS NULL
+            LIMIT 1`,
+        )
+        .get(prKey, headSha),
+    );
+  } catch (err) {
+    if (String(err).includes('no such table') || String(err).includes('no such column')) return false;
+    throw err;
+  } finally {
+    db.close();
+  }
+}
+
+/** Keep at most the current head actionable even before its replacement card is delivered. */
+export async function terminalizeSupersededVerdicts(cfg: Config, prKey: string, headSha: string): Promise<void> {
+  const db = new Database(path.join(DATA_DIR, 'v2.db'));
+  try {
+    const cards = db
+      .prepare(
+        `SELECT v.platform_message_id, v.question, a.platform_id
+           FROM reviewer_verdict_requests v
+           JOIN reviewer_agent_session_aliases a ON a.session_id = v.session_id
+          WHERE v.pr_key = ? AND v.head_sha <> ? AND v.terminal_reason IS NULL
+            AND v.platform_message_id IS NOT NULL`,
+      )
+      .all(prKey, headSha) as Array<{ platform_message_id: string; question: string; platform_id: string }>;
+    db.prepare(
+      `UPDATE reviewer_verdict_requests
+          SET terminal_reason = 'superseded', resolved_at = ?
+        WHERE pr_key = ? AND head_sha <> ? AND terminal_reason IS NULL`,
+    ).run(new Date().toISOString(), prKey, headSha);
+    for (const card of cards) {
+      try {
+        await slackCall(cfg.slackBotToken, 'chat.update', {
+          channel: card.platform_id.replace(/^slack:/, '').split(':')[0],
+          ts: card.platform_message_id,
+          text: `Final PR verdict\n\n${card.question}\n\nExpired — newer head available`,
+          blocks: [],
+        });
+      } catch (err) {
+        console.error(
+          `[pr-reviewer] could not visually expire superseded verdict card ${card.platform_message_id}`,
+          err,
+        );
+      }
+    }
+  } catch (err) {
+    if (!String(err).includes('no such table') && !String(err).includes('no such column')) throw err;
+  } finally {
+    db.close();
   }
 }
 
@@ -704,10 +778,41 @@ export async function setMaterializedAgentSessionStatus(
   const db = new Database(path.join(DATA_DIR, 'v2.db'));
   try {
     if (status === 'closed') {
-      db.prepare('UPDATE reviewer_agent_session_aliases SET closed_at = ? WHERE alias_thread_id = ?').run(
-        new Date().toISOString(),
-        session.aliasThreadId,
-      );
+      const now = new Date().toISOString();
+      const cards = db
+        .prepare(
+          `SELECT v.platform_message_id, v.question
+             FROM reviewer_verdict_requests v
+             JOIN reviewer_agent_session_aliases a ON a.session_id = v.session_id
+            WHERE a.alias_thread_id = ? AND v.terminal_reason IS NULL
+              AND v.platform_message_id IS NOT NULL`,
+        )
+        .all(session.aliasThreadId) as Array<{ platform_message_id: string; question: string }>;
+      db.transaction(() => {
+        db.prepare('UPDATE reviewer_agent_session_aliases SET closed_at = ? WHERE alias_thread_id = ?').run(
+          now,
+          session.aliasThreadId,
+        );
+        db.prepare(
+          `UPDATE reviewer_verdict_requests
+              SET terminal_reason = COALESCE(terminal_reason, 'closed'), resolved_at = COALESCE(resolved_at, ?)
+            WHERE session_id = (
+              SELECT session_id FROM reviewer_agent_session_aliases WHERE alias_thread_id = ?
+            )`,
+        ).run(now, session.aliasThreadId);
+      })();
+      for (const card of cards) {
+        try {
+          await slackCall(cfg.slackBotToken, 'chat.update', {
+            channel: session.channelId,
+            ts: card.platform_message_id,
+            text: `Final PR verdict\n\n${card.question}\n\nExpired — PR already closed`,
+            blocks: [],
+          });
+        } catch (err) {
+          console.error(`[pr-reviewer] could not visually expire closed verdict card ${card.platform_message_id}`, err);
+        }
+      }
     }
   } finally {
     db.close();

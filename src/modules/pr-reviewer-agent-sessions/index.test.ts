@@ -172,6 +172,66 @@ describe('reviewer action-only agent sessions', () => {
     });
   });
 
+  it('delivers only one active card for the same reviewed head', async () => {
+    const { adapter, counts } = fakeAdapter();
+    const signal = {
+      ...msg,
+      content: JSON.stringify({
+        text: 'PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"0123456789abcdef0123456789abcdef01234567"}\nReady',
+      }),
+    };
+
+    await deliverPendingReviewerAgentSession(signal, session, adapter);
+    await deliverPendingReviewerAgentSession({ ...signal, id: 'out-2' }, session, adapter);
+
+    expect(counts()).toEqual({ rootCalls: 1, threadCalls: 0 });
+    expect(
+      getDb().prepare('SELECT COUNT(*) AS n FROM reviewer_verdict_requests WHERE terminal_reason IS NULL').get(),
+    ).toEqual({ n: 1 });
+  });
+
+  it('expires the prior card when a new head gets a verdict', async () => {
+    const { adapter, counts } = fakeAdapter();
+    const firstHead = '0123456789abcdef0123456789abcdef01234567';
+    const secondHead = '89abcdef0123456789abcdef0123456789abcdef';
+    await deliverPendingReviewerAgentSession(
+      {
+        ...msg,
+        content: JSON.stringify({
+          text: `PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"${firstHead}"}\nReady`,
+        }),
+      },
+      session,
+      adapter,
+    );
+    const old = getDb().prepare('SELECT question_id FROM reviewer_verdict_requests').get() as { question_id: string };
+    await deliverPendingReviewerAgentSession(
+      {
+        ...msg,
+        id: 'out-2',
+        content: JSON.stringify({
+          text: `PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"${secondHead}"}\nReady again`,
+        }),
+      },
+      session,
+      adapter,
+    );
+
+    expect(counts()).toEqual({ rootCalls: 1, threadCalls: 2 });
+    expect(vi.mocked(adapter.deliver).mock.calls[1][3]).toBe('chat-sdk');
+    expect(JSON.parse(String(vi.mocked(adapter.deliver).mock.calls[1][4]))).toMatchObject({
+      operation: 'edit',
+      messageId: '1788000000.123456',
+      terminalCard: { resolution: 'Expired — newer verdict available' },
+    });
+    expect(resolveQuestionRender(old.question_id)?.options).toEqual(
+      expect.arrayContaining([expect.objectContaining({ selectedLabel: 'Expired — newer verdict available' })]),
+    );
+    expect(
+      getDb().prepare('SELECT COUNT(*) AS n FROM reviewer_verdict_requests WHERE terminal_reason IS NULL').get(),
+    ).toEqual({ n: 1 });
+  });
+
   it('handles Hold entirely on the host without writing an agent message', async () => {
     const { adapter, counts } = fakeAdapter();
     const signal = {
@@ -194,7 +254,9 @@ describe('reviewer action-only agent sessions', () => {
       }),
     ).resolves.toBe(true);
 
-    expect(getDb().prepare('SELECT COUNT(*) AS n FROM reviewer_verdict_requests').get()).toEqual({ n: 0 });
+    expect(getDb().prepare('SELECT terminal_reason FROM reviewer_verdict_requests').get()).toEqual({
+      terminal_reason: 'held',
+    });
     expect(counts()).toEqual({ rootCalls: 1, threadCalls: 0 });
   });
 
@@ -238,7 +300,9 @@ describe('reviewer action-only agent sessions', () => {
       ).resolves.toBe(true);
       const calls = fs.readFileSync(logPath, 'utf8');
       expect(calls).toContain(`event=APPROVE -f commit_id=${head}`);
-      expect(getDb().prepare('SELECT COUNT(*) AS n FROM reviewer_verdict_requests').get()).toEqual({ n: 0 });
+      expect(getDb().prepare('SELECT terminal_reason FROM reviewer_verdict_requests').get()).toEqual({
+        terminal_reason: 'applied',
+      });
     } finally {
       process.env.PATH = oldPath;
       if (oldGhBin === undefined) delete process.env.PR_REVIEWER_GH_BIN;
@@ -285,7 +349,9 @@ describe('reviewer action-only agent sessions', () => {
         }),
       ).resolves.toBe(true);
       expect(fs.readFileSync(logPath, 'utf8')).not.toContain('/reviews');
-      expect(getDb().prepare('SELECT COUNT(*) AS n FROM reviewer_verdict_requests').get()).toEqual({ n: 0 });
+      expect(getDb().prepare('SELECT terminal_reason FROM reviewer_verdict_requests').get()).toEqual({
+        terminal_reason: 'closed',
+      });
       expect(adapter.setAgentSessionStatus).toHaveBeenLastCalledWith(
         'slack',
         'slack:DOWNER',

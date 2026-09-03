@@ -47,7 +47,30 @@ describe('PR reviewer notification policy', () => {
       expect(hasForeignActivity('apiiro', 'guardian', 123, '2026-09-02T07:00:00Z', 'vardior9')).toEqual({
         ok: true,
         foreign: false,
+        nonActionableAutomationOnly: false,
         context: '',
+      });
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('classifies repeated green CI summaries as non-actionable automation', () => {
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-activity-gh-'));
+    const ghPath = path.join(bin, 'gh');
+    fs.writeFileSync(
+      ghPath,
+      `#!/bin/sh\ncase "$*" in\n  *"issues"*) printf '[{"user":{"login":"apiirobot","type":"User"},"body":":green_circle: **Feature-branch CI passed.** All required checks completed successfully.","created_at":"2026-09-02T08:00:00Z"}]' ;;\n  *) printf '[]' ;;\nesac\n`,
+      { mode: 0o755 },
+    );
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath}`;
+    try {
+      expect(hasForeignActivity('apiiro', 'lim', 123, '2026-09-02T07:00:00Z', 'vardior9')).toMatchObject({
+        ok: true,
+        foreign: true,
+        nonActionableAutomationOnly: true,
       });
     } finally {
       process.env.PATH = oldPath;
