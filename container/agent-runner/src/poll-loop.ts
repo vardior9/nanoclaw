@@ -336,6 +336,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
+    if (config.continuationMode === 'fresh') {
+      log('Fresh turn complete — exiting disposable container');
+      return;
+    }
   }
 }
 

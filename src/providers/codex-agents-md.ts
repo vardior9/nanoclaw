@@ -54,7 +54,7 @@ type ContextProfile = 'standard' | 'focused';
 
 const CONTEXT_PROFILES: Record<ContextProfile, ReadonlySet<string>> = {
   standard: new Set(['runtime', 'memory', 'skills', 'modules', 'mcp']),
-  focused: new Set(['memory', 'skills', 'mcp']),
+  focused: new Set(['mcp']),
 };
 
 export function composeGroupAgentsMd(group: AgentGroup, groupDir: string): void {

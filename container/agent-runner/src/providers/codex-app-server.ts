@@ -379,7 +379,7 @@ export function attachCodexAutoApproval(server: AppServer): void {
 export function writeCodexConfigToml(
   servers: Record<string, McpServerConfig>,
   memorySessionHook: CodexMemorySessionHook,
-  opts: { model?: string; effort?: string } = {},
+  opts: { model?: string; effort?: string; contextProfile?: 'standard' | 'focused' } = {},
 ): void {
   const codexConfigDir = path.join(process.env.HOME || '/home/node', '.codex');
   fs.mkdirSync(codexConfigDir, { recursive: true });
@@ -400,6 +400,11 @@ export function writeCodexConfigToml(
   // memory disabled even if its defaults or a user-level config change.
   lines.push('[features]');
   lines.push('memories = false');
+  if (opts.contextProfile === 'focused') {
+    lines.push('plugins = false');
+    lines.push('apps = false');
+    lines.push('multi_agent = false');
+  }
   lines.push('');
   lines.push('[memories]');
   lines.push('use_memories = false');
@@ -450,10 +455,12 @@ export function writeCodexConfigToml(
   const nextSessionStart = sessionStart
     .map((entry) => removeNanoClawMemoryHooks(entry, memoryCommands))
     .filter((entry) => entry !== undefined);
-  nextSessionStart.push({
-    matcher: memorySessionHook.sources.join('|'),
-    hooks: [{ type: 'command', command: memorySessionHook.command, timeout: 10 }],
-  });
+  if (opts.contextProfile !== 'focused') {
+    nextSessionStart.push({
+      matcher: memorySessionHook.sources.join('|'),
+      hooks: [{ type: 'command', command: memorySessionHook.command, timeout: 10 }],
+    });
+  }
   hooks.SessionStart = nextSessionStart;
   fs.writeFileSync(hooksJsonPath, JSON.stringify(hooksConfig, null, 2) + '\n');
 }

@@ -112,6 +112,9 @@ async function main(): Promise<void> {
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     model: config.model,
     effort: config.effort,
+    contextProfile: config.contextProfile,
+    turnTimeoutMs: config.turnTimeoutMs,
+    maxToolCallsPerTurn: config.maxToolCallsPerTurn,
   });
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
 

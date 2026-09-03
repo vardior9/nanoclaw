@@ -27,6 +27,8 @@ export interface ContainerConfigRow {
   cli_scope: string; // 'disabled' | 'group' | 'global'
   continuation_mode?: string; // 'resume' | 'fresh'; optional for pre-migration fixtures
   context_profile?: string; // 'standard' | 'focused'; optional for pre-migration fixtures
+  turn_timeout_ms?: number | null;
+  max_tool_calls_per_turn?: number | null;
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
   updated_at: string;
 }

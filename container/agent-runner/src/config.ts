@@ -21,6 +21,9 @@ export interface RunnerConfig {
   model?: string;
   effort?: string;
   continuationMode: 'resume' | 'fresh';
+  contextProfile: 'standard' | 'focused';
+  turnTimeoutMs?: number;
+  maxToolCallsPerTurn?: number;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -51,6 +54,9 @@ export function loadConfig(): RunnerConfig {
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
     continuationMode: raw.continuationMode === 'fresh' ? 'fresh' : 'resume',
+    contextProfile: raw.contextProfile === 'focused' ? 'focused' : 'standard',
+    turnTimeoutMs: typeof raw.turnTimeoutMs === 'number' ? raw.turnTimeoutMs : undefined,
+    maxToolCallsPerTurn: typeof raw.maxToolCallsPerTurn === 'number' ? raw.maxToolCallsPerTurn : undefined,
   };
 
   return _config;

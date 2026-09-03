@@ -29,7 +29,11 @@ vi.mock('../config.js', async (importOriginal) => ({
 
 import { buildMounts } from '../container-runner.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../db/index.js';
-import { ensureContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
+import {
+  ensureContainerConfig,
+  updateContainerConfigJson,
+  updateContainerConfigScalars,
+} from '../db/container-configs.js';
 import { getProviderContainerConfig } from './provider-container-registry.js';
 import './index.js'; // the real host provider barrel
 import type { ContainerConfig } from '../container-config.js';
@@ -124,5 +128,22 @@ describe('codex host contribution against real core', () => {
     expect(fs.existsSync(path.join(mirrored, 'SKILL.md'))).toBe(true);
     // A real dir, not a symlink — so it survives syncCodexSkillLinks' symlink-only prune.
     expect(fs.lstatSync(mirrored).isSymbolicLink()).toBe(false);
+  });
+
+  it('does not duplicate the CWD skill plane for focused agents', () => {
+    const ag = group('ag-codex-focused', 'codex-focused-group');
+    createAgentGroup(ag);
+    ensureContainerConfig(ag.id);
+    updateContainerConfigScalars(ag.id, { context_profile: 'focused' });
+
+    const contribution = getProviderContainerConfig('codex')!({
+      sessionDir: path.join(DATA_DIR, 'v2-sessions', ag.id, 'session-1'),
+      agentGroupId: ag.id,
+      groupDir: path.join(GROUPS_DIR, ag.folder),
+      selectedSkills: ['onecli-gateway'],
+      hostEnv: process.env,
+    });
+
+    expect(contribution.mounts?.some((mount) => mount.containerPath === '/home/node/.agents')).toBe(false);
   });
 });

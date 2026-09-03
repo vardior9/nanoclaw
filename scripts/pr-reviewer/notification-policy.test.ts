@@ -4,7 +4,7 @@ import path from 'path';
 
 import { describe, expect, it } from 'vitest';
 
-import { hasForeignActivity, isPendingVerdictMessage } from './lib.js';
+import { classifyReviewerActivity, isPendingVerdictMessage } from './lib.js';
 
 describe('PR reviewer notification policy', () => {
   it('only treats an explicit final-verdict request as reminder-eligible', () => {
@@ -33,21 +33,22 @@ describe('PR reviewer notification policy', () => {
     expect(dispatcher).not.toContain('postRootMessage');
   });
 
-  it('does not wake the model for an empty approval-only review event', () => {
+  it('suppresses an empty approval-only review event', () => {
     const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-activity-gh-'));
     const ghPath = path.join(bin, 'gh');
     fs.writeFileSync(
       ghPath,
-      `#!/bin/sh\ncase "$*" in\n  *"/reviews"*) printf '[{"user":{"login":"teammate"},"state":"APPROVED","body":"","submitted_at":"2026-09-02T08:00:00Z"}]' ;;\n  *) printf '[]' ;;\nesac\n`,
+      `#!/bin/sh\nprintf '%s' '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[]},"reviews":{"nodes":[{"author":{"login":"teammate"},"state":"APPROVED","body":"","submittedAt":"2026-09-02T08:00:00Z"}]},"reviewThreads":{"nodes":[]}}}}}'\n`,
       { mode: 0o755 },
     );
     const oldPath = process.env.PATH;
     process.env.PATH = `${bin}:${oldPath}`;
     try {
-      expect(hasForeignActivity('apiiro', 'guardian', 123, '2026-09-02T07:00:00Z', 'vardior9')).toEqual({
+      expect(classifyReviewerActivity('apiiro', 'guardian', 123, '2026-09-02T07:00:00Z', 'vardior9')).toEqual({
         ok: true,
-        foreign: false,
-        nonActionableAutomationOnly: false,
+        foreign: true,
+        actionable: false,
+        suppressionReason: 'irrelevant_external',
         context: '',
       });
     } finally {
@@ -56,22 +57,47 @@ describe('PR reviewer notification policy', () => {
     }
   });
 
-  it('classifies repeated green CI summaries as non-actionable automation', () => {
+  it('suppresses unrelated automation and human activity', () => {
     const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-activity-gh-'));
     const ghPath = path.join(bin, 'gh');
     fs.writeFileSync(
       ghPath,
-      `#!/bin/sh\ncase "$*" in\n  *"issues"*) printf '[{"user":{"login":"apiirobot","type":"User"},"body":":green_circle: **Feature-branch CI passed.** All required checks completed successfully.","created_at":"2026-09-02T08:00:00Z"}]' ;;\n  *) printf '[]' ;;\nesac\n`,
+      `#!/bin/sh\nprintf '%s' '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[{"author":{"login":"apiirobot"},"body":"CI passed","createdAt":"2026-09-02T08:00:00Z"},{"author":{"login":"teammate"},"body":"Looks good","createdAt":"2026-09-02T08:01:00Z"}]},"reviews":{"nodes":[]},"reviewThreads":{"nodes":[]}}}}}'\n`,
       { mode: 0o755 },
     );
     const oldPath = process.env.PATH;
     process.env.PATH = `${bin}:${oldPath}`;
     try {
-      expect(hasForeignActivity('apiiro', 'lim', 123, '2026-09-02T07:00:00Z', 'vardior9')).toMatchObject({
+      expect(classifyReviewerActivity('apiiro', 'lim', 123, '2026-09-02T07:00:00Z', 'vardior9')).toMatchObject({
         ok: true,
         foreign: true,
-        nonActionableAutomationOnly: true,
+        actionable: false,
+        suppressionReason: 'irrelevant_external',
       });
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('wakes only for direct mentions and replies on unresolved self-authored threads', () => {
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-activity-gh-'));
+    const ghPath = path.join(bin, 'gh');
+    fs.writeFileSync(
+      ghPath,
+      `#!/bin/sh\nprintf '%s' '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[{"author":{"login":"author"},"body":"@vardior9 please reconsider","createdAt":"2026-09-02T08:00:00Z","url":"https://example/direct"}]},"reviews":{"nodes":[]},"reviewThreads":{"nodes":[{"isResolved":false,"path":"src/a.ts","line":12,"comments":{"nodes":[{"author":{"login":"vardior9"},"body":"finding","createdAt":"2026-09-02T06:00:00Z"},{"author":{"login":"author"},"body":"fixed in latest","createdAt":"2026-09-02T08:01:00Z","url":"https://example/reply"}]}},{"isResolved":true,"path":"src/b.ts","line":3,"comments":{"nodes":[{"author":{"login":"vardior9"},"body":"old","createdAt":"2026-09-02T06:00:00Z"},{"author":{"login":"author"},"body":"resolved reply","createdAt":"2026-09-02T08:02:00Z"}]}}]}}}}}'\n`,
+      { mode: 0o755 },
+    );
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath}`;
+    try {
+      const result = classifyReviewerActivity('apiiro', 'lim', 123, '2026-09-02T07:00:00Z', 'vardior9');
+      expect(result).toMatchObject({ ok: true, foreign: true, actionable: true, suppressionReason: null });
+      if (result.ok) {
+        expect(result.context).toContain('@vardior9 please reconsider');
+        expect(result.context).toContain('src/a.ts:12: fixed in latest');
+        expect(result.context).not.toContain('resolved reply');
+      }
     } finally {
       process.env.PATH = oldPath;
       fs.rmSync(bin, { recursive: true, force: true });

@@ -93,6 +93,26 @@ describe('Codex config TOML', () => {
     expect(CODEX_APP_SERVER_ARGS).toContain('--dangerously-bypass-hook-trust');
   });
 
+  it('removes general Codex payload and memory hooks for focused agents', () => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
+    process.env.HOME = tmpHome;
+    const hooksPath = path.join(tmpHome, '.codex', 'hooks.json');
+    fs.mkdirSync(path.dirname(hooksPath), { recursive: true });
+    fs.writeFileSync(
+      hooksPath,
+      JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ command: MEMORY_SESSION_HOOK.command }] }] } }),
+    );
+
+    writeCodexConfigToml({}, MEMORY_SESSION_HOOK, { contextProfile: 'focused' });
+
+    const content = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf-8');
+    expect(content).toContain('plugins = false');
+    expect(content).toContain('apps = false');
+    expect(content).toContain('multi_agent = false');
+    const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+    expect(hooks.hooks.SessionStart).toEqual([]);
+  });
+
   it('emits cwd for a stdio server above the env sub-table, and omits it when absent', () => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
     process.env.HOME = tmpHome;

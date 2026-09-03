@@ -12,6 +12,8 @@ const SCALAR_COLUMNS = new Set([
   'cli_scope',
   'continuation_mode',
   'context_profile',
+  'turn_timeout_ms',
+  'max_tool_calls_per_turn',
   'timezone',
 ]);
 const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
@@ -33,14 +35,22 @@ export function createContainerConfig(config: ContainerConfigRow): void {
       `INSERT INTO container_configs (
         agent_group_id, provider, model, effort, image_tag, assistant_name,
         max_messages_per_prompt, skills, mcp_servers, packages_apt, packages_npm,
-        additional_mounts, cli_scope, continuation_mode, context_profile, timezone, updated_at
+        additional_mounts, cli_scope, continuation_mode, context_profile, turn_timeout_ms,
+        max_tool_calls_per_turn, timezone, updated_at
       ) VALUES (
         @agent_group_id, @provider, @model, @effort, @image_tag, @assistant_name,
         @max_messages_per_prompt, @skills, @mcp_servers, @packages_apt, @packages_npm,
-        @additional_mounts, @cli_scope, @continuation_mode, @context_profile, @timezone, @updated_at
+        @additional_mounts, @cli_scope, @continuation_mode, @context_profile, @turn_timeout_ms,
+        @max_tool_calls_per_turn, @timezone, @updated_at
       )`,
     )
-    .run({ continuation_mode: 'resume', context_profile: 'standard', ...config });
+    .run({
+      continuation_mode: 'resume',
+      context_profile: 'standard',
+      turn_timeout_ms: null,
+      max_tool_calls_per_turn: null,
+      ...config,
+    });
 }
 
 /**
@@ -90,6 +100,8 @@ export function updateContainerConfigScalars(
       | 'cli_scope'
       | 'continuation_mode'
       | 'context_profile'
+      | 'turn_timeout_ms'
+      | 'max_tool_calls_per_turn'
       | 'timezone'
     >
   >,

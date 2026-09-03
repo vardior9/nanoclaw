@@ -69,9 +69,16 @@ describe('resolveGroupTimezone', () => {
     expect(defaults.continuationMode).toBe('resume');
     expect(defaults.contextProfile).toBe('standard');
 
-    updateContainerConfigScalars(GROUP.id, { continuation_mode: 'fresh', context_profile: 'focused' });
+    updateContainerConfigScalars(GROUP.id, {
+      continuation_mode: 'fresh',
+      context_profile: 'focused',
+      turn_timeout_ms: 300_000,
+      max_tool_calls_per_turn: 20,
+    });
     const focused = configFromDb(getContainerConfig(GROUP.id)!, GROUP);
     expect(focused.continuationMode).toBe('fresh');
+    expect(focused.turnTimeoutMs).toBe(300_000);
+    expect(focused.maxToolCallsPerTurn).toBe(20);
     expect(focused.contextProfile).toBe('focused');
   });
 });

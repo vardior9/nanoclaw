@@ -33,8 +33,7 @@ import {
   getPrDetail,
   getSlackThreadReplies,
   getUnresolvedSelfReviewThreads,
-  hasForeignActivity,
-  hasPendingExactHeadVerdict,
+  classifyReviewerActivity,
   injectCliEvent,
   isPendingVerdictMessage,
   latestSelfReviewState,
@@ -87,8 +86,17 @@ function repoLogKey(owner: string, repo: string): string {
   return `${owner}/${repo}`;
 }
 
-function formatKickoffMessage(owner: string, repo: string, pr: PrDetail): string {
+function reviewerWakeId(kind: 'new_pr' | 'push' | 'activity', key: string, marker: string): string {
+  return `${kind}:${key}:${marker}`;
+}
+
+function recordWakeDecision(wakeId: string, decision: 'wake' | 'suppress', reason: string): void {
+  console.log(`[pr-reviewer-metric] ${JSON.stringify({ wake_id: wakeId, decision, reason })}`);
+}
+
+function formatKickoffMessage(owner: string, repo: string, pr: PrDetail, wakeId: string): string {
   return [
+    `Reviewer wake id: ${wakeId}`,
     `New PR ready for review: ${pr.html_url}`,
     `owner/repo: ${owner}/${repo}`,
     `PR number: ${pr.number}`,
@@ -111,8 +119,10 @@ function formatReReviewMessage(
   pr: PrDetail,
   deltaContext: string,
   unresolvedContext: string,
+  wakeId: string,
 ): string {
   return [
+    `Reviewer wake id: ${wakeId}`,
     `New commits pushed to ${owner}/${repo}#${pr.number} — head is now ${pr.head.sha}.`,
     `Re-fetch into the existing worktree at ${containerWorktreePath(owner, repo, pr.number)} (bare clone: ${containerBarePath(owner, repo)}) and re-review.`,
     '',
@@ -126,8 +136,15 @@ function formatReReviewMessage(
   ].join('\n');
 }
 
-function formatActivityMessage(owner: string, repo: string, pr: PrDetail, activityContext: string): string {
+function formatActivityMessage(
+  owner: string,
+  repo: string,
+  pr: PrDetail,
+  activityContext: string,
+  wakeId: string,
+): string {
   return [
+    `Reviewer wake id: ${wakeId}`,
     `New activity on ${owner}/${repo}#${pr.number} (comments/reviews, no new commits). Check whether a GitHub follow-up is warranted.`,
     'This is a fresh model thread. Only the new external activity since the previous host checkpoint is included:',
     activityContext || '(no external activity details)',
@@ -152,6 +169,7 @@ function ensureBareCloneOnce(owner: string, repo: string, ctx: TickCtx): { ok: t
 async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCtx): Promise<void> {
   const { owner, repo } = ref;
   const pendingThread = pendingSlackReviewThreadId(ctx.cfg, key);
+  const wakeId = reviewerWakeId('new_pr', key, pr.head.sha);
 
   const clone = ensureBareCloneOnce(owner, repo, ctx);
   if (!clone.ok) {
@@ -167,7 +185,7 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
   try {
     await injectCliEvent(
       {
-        text: formatKickoffMessage(owner, repo, pr),
+        text: formatKickoffMessage(owner, repo, pr, wakeId),
         to: reviewDestination(ctx.cfg, pendingThread),
         senderId: `slack:${ctx.cfg.ownerSlackId}`,
       },
@@ -177,6 +195,8 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
     console.error(`[pr-reviewer] ${key}: failed to inject kickoff`, err);
     return; // no state recorded
   }
+
+  recordWakeDecision(wakeId, 'wake', 'new_pr');
 
   if (ctx.args.dryRun) {
     console.log(`[dry-run] ${key}: would bootstrap silently in ${pendingThread}`);
@@ -199,6 +219,7 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
 
 async function handlePush(key: string, ref: PrRef, pr: PrDetail, known: PrState, ctx: TickCtx): Promise<void> {
   const { owner, repo } = ref;
+  const wakeId = reviewerWakeId('push', key, pr.head.sha);
   const clone = ensureBareCloneOnce(owner, repo, ctx);
   if (!clone.ok) {
     console.error(`[pr-reviewer] ${key}: bare clone unavailable, skipping re-review this tick: ${clone.error}`);
@@ -226,7 +247,7 @@ async function handlePush(key: string, ref: PrRef, pr: PrDetail, known: PrState,
   try {
     await injectCliEvent(
       {
-        text: formatReReviewMessage(owner, repo, pr, deltaContext, unresolvedContext),
+        text: formatReReviewMessage(owner, repo, pr, deltaContext, unresolvedContext, wakeId),
         to: reviewDestination(ctx.cfg, known.thread_ts),
         senderId: `slack:${ctx.cfg.ownerSlackId}`,
       },
@@ -236,6 +257,7 @@ async function handlePush(key: string, ref: PrRef, pr: PrDetail, known: PrState,
     console.error(`[pr-reviewer] ${key}: failed to inject re-review`, err);
     return;
   }
+  recordWakeDecision(wakeId, 'wake', 'new_head');
 
   if (ctx.args.dryRun) return;
   ctx.state[key] = {
@@ -250,23 +272,21 @@ async function handlePush(key: string, ref: PrRef, pr: PrDetail, known: PrState,
 }
 
 async function handleActivity(key: string, ref: PrRef, pr: PrDetail, known: PrState, ctx: TickCtx): Promise<void> {
-  // Skip wakes caused by the reviewer's own GitHub writes (same login as the
-  // owner): if nothing since the baseline is authored by someone else, just
-  // advance the baseline. On lookup failure, fall through and wake the agent
-  // — a wasted turn beats a missed author reply.
-  const activity = hasForeignActivity(ref.owner, ref.repo, ref.number, known.last_seen_updated_at, ctx.cfg.selfLogin);
-  if (activity.ok && !activity.foreign) {
+  // Only direct mentions and replies on this reviewer's unresolved threads
+  // merit another model turn. On lookup failure, fail open so a GitHub API
+  // outage cannot permanently hide a relevant author reply.
+  const activity = classifyReviewerActivity(
+    ref.owner,
+    ref.repo,
+    ref.number,
+    known.last_seen_updated_at,
+    ctx.cfg.selfLogin,
+  );
+  const wakeId = reviewerWakeId('activity', key, pr.updated_at);
+  if (activity.ok && !activity.actionable) {
+    recordWakeDecision(wakeId, 'suppress', activity.suppressionReason ?? 'irrelevant_external');
     if (ctx.args.dryRun) {
-      console.log(`[dry-run] ${key}: updated_at advanced but no foreign activity — would advance baseline silently`);
-      return;
-    }
-    ctx.state[key] = { ...known, pr_title: pr.title, last_seen_updated_at: pr.updated_at };
-    saveState(ctx.state);
-    return;
-  }
-  if (activity.ok && activity.nonActionableAutomationOnly && hasPendingExactHeadVerdict(key, pr.head.sha)) {
-    if (ctx.args.dryRun) {
-      console.log(`[dry-run] ${key}: exact-head verdict pending; would ignore repeated green CI summary`);
+      console.log(`[dry-run] ${key}: ${activity.suppressionReason} — would advance baseline silently`);
       return;
     }
     ctx.state[key] = { ...known, pr_title: pr.title, last_seen_updated_at: pr.updated_at };
@@ -276,7 +296,7 @@ async function handleActivity(key: string, ref: PrRef, pr: PrDetail, known: PrSt
   try {
     await injectCliEvent(
       {
-        text: formatActivityMessage(ref.owner, ref.repo, pr, activity.ok ? activity.context : ''),
+        text: formatActivityMessage(ref.owner, ref.repo, pr, activity.ok ? activity.context : '', wakeId),
         to: reviewDestination(ctx.cfg, known.thread_ts),
         senderId: `slack:${ctx.cfg.ownerSlackId}`,
       },
@@ -286,6 +306,7 @@ async function handleActivity(key: string, ref: PrRef, pr: PrDetail, known: PrSt
     console.error(`[pr-reviewer] ${key}: failed to inject activity nudge`, err);
     return; // last_seen_updated_at left unchanged so we retry next tick
   }
+  recordWakeDecision(wakeId, 'wake', activity.ok ? 'relevant_activity' : 'classification_failed_open');
   if (ctx.args.dryRun) return;
   ctx.state[key] = { ...known, pr_title: pr.title, last_seen_updated_at: pr.updated_at };
   saveState(ctx.state);

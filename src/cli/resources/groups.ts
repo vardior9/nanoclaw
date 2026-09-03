@@ -67,6 +67,8 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     cli_scope: row.cli_scope,
     continuation_mode: row.continuation_mode ?? 'resume',
     context_profile: row.context_profile ?? 'standard',
+    turn_timeout_ms: row.turn_timeout_ms ?? null,
+    max_tool_calls_per_turn: row.max_tool_calls_per_turn ?? null,
     timezone: row.timezone,
     updated_at: row.updated_at,
   };
@@ -337,7 +339,7 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --continuation-mode, --context-profile, ' +
+        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --continuation-mode, --context-profile, --turn-timeout-ms, --max-tool-calls-per-turn, ' +
         '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
       handler: async (args) => {
         const id = args.id as string;
@@ -357,6 +359,8 @@ registerResource({
             | 'cli_scope'
             | 'continuation_mode'
             | 'context_profile'
+            | 'turn_timeout_ms'
+            | 'max_tool_calls_per_turn'
             | 'timezone'
           >
         > = {};
@@ -387,10 +391,18 @@ registerResource({
             throw new Error('--context-profile must be standard or focused');
           updates.context_profile = profile;
         }
+        for (const field of ['turn_timeout_ms', 'max_tool_calls_per_turn'] as const) {
+          if (args[field] === undefined) continue;
+          const value = Number(args[field]);
+          if (!Number.isInteger(value) || value <= 0) {
+            throw new Error(`--${field.replaceAll('_', '-')} must be a positive integer`);
+          }
+          updates[field] = value;
+        }
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --continuation-mode, --context-profile, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --continuation-mode, --context-profile, --turn-timeout-ms, --max-tool-calls-per-turn, --timezone',
           );
         }
 

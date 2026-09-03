@@ -288,71 +288,115 @@ export function latestSelfReviewState(
   }
 }
 
-/**
- * Whether the PR saw activity from anyone OTHER than selfLogin since the
- * given timestamp. The reviewer's own review posts (same PAT identity as the
- * owner) advance `updated_at`, so waking the agent on every change would
- * burn one no-op model turn per review the agent itself posts. Comments and
- * review submissions carry authorship; a sha change is handled separately.
- */
-export function hasForeignActivity(
+/** Classify whether post-review activity merits another model turn. */
+export function classifyReviewerActivity(
   owner: string,
   repo: string,
   number: number,
   sinceIso: string,
   selfLogin: string,
 ):
-  | { ok: true; foreign: boolean; nonActionableAutomationOnly: boolean; context: string }
+  | {
+      ok: true;
+      foreign: boolean;
+      actionable: boolean;
+      suppressionReason: 'self_only' | 'irrelevant_external' | null;
+      context: string;
+    }
   | { ok: false; error: string } {
-  interface Authored {
-    user?: { login?: string; type?: string } | null;
-    submitted_at?: string;
-    created_at?: string;
+  interface Activity {
+    author?: { login?: string } | null;
+    submittedAt?: string;
+    createdAt?: string;
     body?: string;
     state?: string;
     path?: string;
     line?: number | null;
-    html_url?: string;
+    url?: string;
   }
-  const isNonActionableAutomation = (item: Authored): boolean =>
-    item.user?.login === 'apiirobot' &&
-    /^:green_circle:\s+\*\*Feature-branch CI passed\.\*\*/.test(item.body?.trim() ?? '');
-  const foreignIn = (items: Authored[], after?: boolean): Authored[] =>
-    items.filter(
-      (item) =>
-        (!after || (item.submitted_at ?? item.created_at ?? '') > sinceIso) &&
-        item.user?.login !== undefined &&
-        item.user.login !== selfLogin,
-    );
-
-  const issueComments = runGh(['api', `repos/${owner}/${repo}/issues/${number}/comments?since=${sinceIso}`]);
-  if (!issueComments.ok) return { ok: false, error: issueComments.error };
-  const reviewComments = runGh(['api', `repos/${owner}/${repo}/pulls/${number}/comments?since=${sinceIso}`]);
-  if (!reviewComments.ok) return { ok: false, error: reviewComments.error };
-  // The reviews list has no `since` param — filter on submitted_at client-side.
-  const reviews = runGh(['api', `repos/${owner}/${repo}/pulls/${number}/reviews`]);
-  if (!reviews.ok) return { ok: false, error: reviews.error };
+  interface Thread {
+    isResolved?: boolean;
+    path?: string;
+    line?: number | null;
+    comments?: { nodes?: Activity[] };
+  }
+  interface Response {
+    data?: {
+      repository?: {
+        pullRequest?: {
+          comments?: { nodes?: Activity[] };
+          reviews?: { nodes?: Activity[] };
+          reviewThreads?: { nodes?: Thread[] };
+        };
+      };
+    };
+  }
+  const query = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){comments(last:100){nodes{author{login}body createdAt url}}reviews(last:100){nodes{author{login}body state submittedAt url}}reviewThreads(first:100){nodes{isResolved path line comments(first:100){nodes{author{login}body createdAt url}}}}}}}`;
+  const response = runGh([
+    'api',
+    'graphql',
+    '-f',
+    `query=${query}`,
+    '-F',
+    `owner=${owner}`,
+    '-F',
+    `repo=${repo}`,
+    '-F',
+    `number=${number}`,
+  ]);
+  if (!response.ok) return { ok: false, error: response.error };
 
   try {
-    const items = [
-      ...foreignIn(JSON.parse(issueComments.stdout) as Authored[]),
-      ...foreignIn(JSON.parse(reviewComments.stdout) as Authored[]),
-      ...foreignIn(JSON.parse(reviews.stdout) as Authored[], true).filter(
-        (item) => item.state !== 'APPROVED' || Boolean(item.body?.trim()),
-      ),
-    ].sort((a, b) => String(a.submitted_at ?? a.created_at).localeCompare(String(b.submitted_at ?? b.created_at)));
-    const context = items
+    const pr = (JSON.parse(response.stdout) as Response).data?.repository?.pullRequest;
+    if (!pr) return { ok: false, error: 'GraphQL response did not contain the pull request' };
+    const login = selfLogin.toLowerCase();
+    const isNewForeign = (item: Activity): boolean => {
+      const author = item.author?.login;
+      return Boolean(author && author.toLowerCase() !== login && (item.createdAt ?? item.submittedAt ?? '') > sinceIso);
+    };
+    const mention = new RegExp(`(^|\\W)@${selfLogin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\W|$)`, 'i');
+    const foreign = [...(pr.comments?.nodes ?? []), ...(pr.reviews?.nodes ?? [])].filter(isNewForeign);
+    const actionable: Array<Activity & { path?: string; line?: number | null }> = [];
+    const actionableKeys = new Set<string>();
+    const addActionable = (item: Activity & { path?: string; line?: number | null }): void => {
+      const key = item.url ?? `${item.createdAt ?? item.submittedAt}:${item.author?.login}:${item.path}:${item.body}`;
+      if (!actionableKeys.has(key)) {
+        actionableKeys.add(key);
+        actionable.push(item);
+      }
+    };
+    foreign.filter((item) => mention.test(item.body ?? '')).forEach(addActionable);
+
+    for (const thread of pr.reviewThreads?.nodes ?? []) {
+      const comments = thread.comments?.nodes ?? [];
+      const root = comments[0];
+      const newComments = comments.filter(isNewForeign);
+      foreign.push(...newComments);
+      newComments
+        .filter((comment) => mention.test(comment.body ?? ''))
+        .forEach((comment) => addActionable({ ...comment, path: thread.path, line: thread.line }));
+      if (!thread.isResolved && root?.author?.login?.toLowerCase() === login) {
+        comments
+          .slice(1)
+          .filter(isNewForeign)
+          .forEach((reply) => addActionable({ ...reply, path: thread.path, line: thread.line }));
+      }
+    }
+
+    actionable.sort((a, b) => String(a.submittedAt ?? a.createdAt).localeCompare(String(b.submittedAt ?? b.createdAt)));
+    const context = actionable
       .slice(-30)
       .map((item) => {
         const where = item.path ? `${item.path}${item.line ? `:${item.line}` : ''}` : (item.state ?? 'conversation');
         const body = (item.body ?? '').replace(/\s+/g, ' ').trim().slice(0, 800) || '(no body)';
-        return `- ${item.user?.login} at ${where}: ${body}${item.html_url ? ` (${item.html_url})` : ''}`;
+        return `- ${item.author?.login} at ${where}: ${body}${item.url ? ` (${item.url})` : ''}`;
       })
       .join('\n');
     return {
       ok: true,
-      foreign: items.length > 0,
-      nonActionableAutomationOnly: items.length > 0 && items.every(isNonActionableAutomation),
+      foreign: foreign.length > 0,
+      actionable: actionable.length > 0,
+      suppressionReason: actionable.length > 0 ? null : foreign.length > 0 ? 'irrelevant_external' : 'self_only',
       context,
     };
   } catch (err) {

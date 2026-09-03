@@ -61,27 +61,22 @@ describe('poll loop integration', () => {
       { platformId: 'chan-1', channelType: 'discord' },
     );
     const provider = new RecordingProvider({}, () => '<message to="discord-test">done</message>');
-    const controller = new AbortController();
-    const loopPromise = runPollLoop({
+    await runPollLoop({
       provider,
       providerName: 'mock',
       continuationMode: 'fresh',
       cwd: '/tmp',
-      signal: controller.signal,
     });
 
-    await waitFor(() => getUndeliveredMessages().length === 1, 2000);
     insertMessage(
       'm-fresh-2',
       { sender: 'host', text: 'review head two' },
       { platformId: 'chan-1', channelType: 'discord' },
     );
-    await waitFor(() => getUndeliveredMessages().length === 2, 2000);
-    controller.abort();
+    await runPollLoop({ provider, providerName: 'mock', continuationMode: 'fresh', cwd: '/tmp' });
 
     expect(provider.continuations).toEqual([undefined, undefined]);
     expect(getContinuation('mock')).toBeUndefined();
-    await loopPromise;
   });
 
   it('carries the immediately preceding assistant question into a fresh human reply', async () => {
@@ -104,28 +99,23 @@ describe('poll loop integration', () => {
         ? '<message to="discord-test">Scope decision needed: choose full, high-value, or skip.</message>'
         : '<message to="discord-test">Starting full review.</message>',
     );
-    const controller = new AbortController();
-    const loopPromise = runPollLoop({
+    await runPollLoop({
       provider,
       providerName: 'mock',
       continuationMode: 'fresh',
       cwd: '/tmp',
-      signal: controller.signal,
     });
 
-    await waitFor(() => getUndeliveredMessages().length === 1, 2000);
     insertMessage(
       'human-reply',
       { sender: 'Or', text: 'full' },
       { platformId: 'chan-1', channelType: 'discord', threadId: 'real-thread-ts', kind: 'chat-sdk', seq: 4 },
     );
-    await waitFor(() => provider.prompts.length === 2, 2000);
-    controller.abort();
+    await runPollLoop({ provider, providerName: 'mock', continuationMode: 'fresh', cwd: '/tmp' });
 
     expect(provider.prompts[1]).toContain('Scope decision needed: choose full, high-value, or skip.');
     expect(provider.prompts[1]).toContain('full');
     expect(provider.prompts[1]).not.toContain('Review https://github.com/apiiro/lim/pull/49510');
-    await loopPromise;
   });
 
   it('should pick up a message, process it, and write a response', async () => {

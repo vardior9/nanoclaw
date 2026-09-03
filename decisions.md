@@ -7,3 +7,7 @@
 - 2026-09-02: Closed PRs retain verdict-card render metadata; late clicks resolve as expired host-side instead of leaking a raw option index or waking the model.
 - 2026-09-03: Verdict rows are an explicit host state machine with one active exact-head card; only known green-CI summaries may advance silently while that card is pending, preserving human and finding-bearing activity.
 - 2026-09-03: Fresh provider calls carry only the latest assistant chat (bounded to 4,000 characters) when answering a human Chat SDK reply; this preserves a question/reply pair without replaying history or resuming provider memory, proven by the PR #49510 scope-choice regression.
+- 2026-09-03: Activity wakes are host-classified from one GitHub GraphQL snapshot; only direct reviewer mentions or new replies on unresolved reviewer-owned threads invoke the model, while all other activity advances the checkpoint with a stable suppression reason.
+- 2026-09-03: Focused Codex agents receive only persona plus explicit MCP instructions; plugins, apps, multi-agent support, NanoClaw memory hooks, and the duplicate user-level skill mount are disabled for the reviewer profile.
+- 2026-09-03: Fresh-mode turns are disposable containers that exit immediately after one batch; reviewer turns additionally stop at five minutes or after 20 tool calls.
+- 2026-09-03: Every dispatch decision records a deterministic wake id, decision, and reason; the same id is embedded in model prompts so Codex JSONL token counters can be joined back to individual wakes.

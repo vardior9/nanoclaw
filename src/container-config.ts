@@ -251,6 +251,8 @@ export interface ContainerConfig {
   effort?: string;
   continuationMode?: 'resume' | 'fresh';
   contextProfile?: 'standard' | 'focused';
+  turnTimeoutMs?: number;
+  maxToolCallsPerTurn?: number;
   timezone?: string;
 }
 
@@ -333,6 +335,8 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     effort: row.effort ?? undefined,
     continuationMode: row.continuation_mode === 'fresh' ? 'fresh' : 'resume',
     contextProfile: row.context_profile === 'focused' ? 'focused' : 'standard',
+    turnTimeoutMs: row.turn_timeout_ms ?? undefined,
+    maxToolCallsPerTurn: row.max_tool_calls_per_turn ?? undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
   };
 }

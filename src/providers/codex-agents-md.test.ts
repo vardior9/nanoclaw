@@ -83,8 +83,8 @@ describe('composeGroupAgentsMd cap handling', () => {
       composeGroupAgentsMd(g, groupDir);
       const doc = fs.readFileSync(path.join(groupDir, 'AGENTS.md'), 'utf-8');
       expect(doc).toContain('# Persona');
-      expect(doc).toContain('# Memory System');
-      expect(doc).toContain('# Native Runtime Skills');
+      expect(doc).not.toContain('# Memory System');
+      expect(doc).not.toContain('# Native Runtime Skills');
       expect(doc).not.toContain('# NanoClaw Runtime Contract');
       expect(doc).not.toContain('# NanoClaw Module:');
     } finally {

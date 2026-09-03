@@ -152,6 +152,8 @@ function installReviewerRuntime(groupId: string): void {
     context_profile: 'focused',
     cli_scope: 'disabled',
     max_messages_per_prompt: 4,
+    turn_timeout_ms: 5 * 60 * 1000,
+    max_tool_calls_per_turn: 20,
   });
   console.log(`configured group ${groupId} for fresh, focused reviewer turns`);
 }

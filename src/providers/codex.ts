@@ -31,6 +31,7 @@ import path from 'path';
 
 import { DATA_DIR } from '../config.js';
 import { getAgentGroup } from '../db/agent-groups.js';
+import { getContainerConfig } from '../db/container-configs.js';
 import { materializeTemplateSkills } from '../group-skills.js';
 import { composeGroupAgentsMd } from './codex-agents-md.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
@@ -74,7 +75,8 @@ registerProviderContainerConfig(
       mounts.push({ hostPath: composedAgentsMd, containerPath: '/workspace/agent/AGENTS.md', readonly: true });
     }
     const agentsDir = path.join(ctx.groupDir, '.agents');
-    if (fs.existsSync(agentsDir)) {
+    const focused = getContainerConfig(ctx.agentGroupId)?.context_profile === 'focused';
+    if (!focused && fs.existsSync(agentsDir)) {
       // One discovery plane only. Newer Codex versions discover both the CWD
       // and user-level .agents trees even at this non-git workspace; mounting
       // the same directory at both paths duplicates every skill in the prompt.

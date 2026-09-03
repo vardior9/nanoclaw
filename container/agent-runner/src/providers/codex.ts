@@ -92,6 +92,9 @@ export class CodexProvider implements AgentProvider {
   private readonly mcpServers: Record<string, McpServerConfig>;
   private readonly model?: string;
   private readonly effort?: CodexReasoningEffort;
+  private readonly contextProfile: 'standard' | 'focused';
+  private readonly turnTimeoutMs: number;
+  private readonly maxToolCallsPerTurn?: number;
   private readonly runtime: CodexRuntimeDeps;
   private memorySessionHook?: CodexMemorySessionHook;
 
@@ -100,6 +103,9 @@ export class CodexProvider implements AgentProvider {
     this.model = options.model;
     this.runtime = runtime;
     this.effort = normalizeEffort(options.effort);
+    this.contextProfile = options.contextProfile ?? 'standard';
+    this.turnTimeoutMs = options.turnTimeoutMs ?? TURN_TIMEOUT_MS;
+    this.maxToolCallsPerTurn = options.maxToolCallsPerTurn;
   }
 
   registerMemorySessionHook(hook: CodexMemorySessionHook): void {
@@ -146,6 +152,7 @@ export class CodexProvider implements AgentProvider {
       self.runtime.writeCodexConfigToml(self.mcpServers, memorySessionHook, {
         model: self.model,
         effort: self.effort,
+        contextProfile: self.contextProfile,
       });
       const server = self.runtime.spawnCodexAppServer();
       activeServer = server;
@@ -195,6 +202,9 @@ export class CodexProvider implements AgentProvider {
               wakeActiveTurn = waker;
             },
             self.runtime.startCodexTurn,
+            self.runtime.interruptCodexTurn,
+            self.turnTimeoutMs,
+            self.maxToolCallsPerTurn,
           );
         }
       } finally {
@@ -239,11 +249,15 @@ async function* runOneTurn(
   isAborted: () => boolean,
   setAbortWaker: (waker: (() => void) | null) => void,
   startTurn: typeof startCodexTurn,
+  interruptTurn: typeof interruptCodexTurn,
+  turnTimeoutMs: number,
+  maxToolCallsPerTurn: number | undefined,
 ): AsyncGenerator<ProviderEvent> {
   const state: { error: Error | null } = { error: null };
   let resultText = '';
   let turnDone = false;
   let turnId: string | null = null;
+  let toolCalls = 0;
 
   // A finished turn can no longer absorb steered input: codex's turn/steer
   // against a completed turn resolves as a no-op, so a follow-up routed there
@@ -288,6 +302,20 @@ async function* runOneTurn(
       case 'item/agentMessage/delta': {
         const delta = params.delta as string | undefined;
         if (delta) resultText += delta;
+        break;
+      }
+      case 'item/started': {
+        const item = params.item as { type?: string } | undefined;
+        if (item?.type && !['agentMessage', 'reasoning', 'plan', 'userMessage'].includes(item.type)) {
+          toolCalls += 1;
+          if (maxToolCallsPerTurn !== undefined && toolCalls > maxToolCallsPerTurn) {
+            state.error = new Error(
+              `Tool-call budget exceeded after ${toolCalls} calls (limit ${maxToolCallsPerTurn})`,
+            );
+            if (turnId) void interruptTurn(server, threadId, turnId).catch(() => {});
+            finishTurn();
+          }
+        }
         break;
       }
       case 'item/completed': {
@@ -343,10 +371,11 @@ async function* runOneTurn(
   server.exitHandlers.push(onServerExit);
 
   const timer = setTimeout(() => {
-    state.error = new Error(`Turn timed out after ${TURN_TIMEOUT_MS}ms`);
+    state.error = new Error(`Turn timed out after ${turnTimeoutMs}ms`);
+    if (turnId) void interruptTurn(server, threadId, turnId).catch(() => {});
     finishTurn();
     kick();
-  }, TURN_TIMEOUT_MS);
+  }, turnTimeoutMs);
 
   try {
     if (!hasInit()) {

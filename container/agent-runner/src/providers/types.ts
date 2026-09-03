@@ -93,6 +93,9 @@ export interface ProviderOptions {
    * through to the underlying SDK. If omitted, the SDK default is used.
    */
   effort?: string;
+  contextProfile?: 'standard' | 'focused';
+  turnTimeoutMs?: number;
+  maxToolCallsPerTurn?: number;
 }
 
 export interface QueryInput {

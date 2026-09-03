@@ -161,6 +161,23 @@ describe('CodexProvider active turns', () => {
     expect(errors).toHaveLength(1);
     expect((errors[0] as { message: string }).message).toContain('app-server exited');
   });
+
+  it('interrupts a turn that exceeds its tool-call budget', async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({ maxToolCallsPerTurn: 1 }, fake.runtime);
+    const query = provider.query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events);
+    await waitFor(() => fake.startCalls.length === 1);
+
+    fake.startTool('commandExecution');
+    fake.startTool('mcpToolCall');
+    await collect.catch(() => {});
+
+    expect(fake.interruptCalls).toHaveLength(1);
+    const errors = events.filter((event) => event.type === 'error');
+    expect((errors[0] as { message: string }).message).toContain('Tool-call budget exceeded');
+  });
 });
 
 function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
@@ -209,6 +226,9 @@ function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
     },
     completeTurn(text: string) {
       notify('turn/completed', { turn: { items: [{ type: 'agentMessage', text }] } });
+    },
+    startTool(type: string) {
+      notify('item/started', { item: { type } });
     },
     crashServer(err: Error) {
       for (const h of [...server.exitHandlers]) h(err);
