@@ -129,11 +129,7 @@ describe('poll loop integration', () => {
   });
 
   it('should pick up a message, process it, and write a response', async () => {
-    insertMessage(
-      'm1',
-      { sender: 'Alice', text: 'What is the meaning of life?' },
-      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' },
-    );
+    insertMessage('m1', { sender: 'Alice', text: 'What is the meaning of life?' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' });
 
     const provider = new MockProvider({}, () => '<message to="discord-test">42</message>');
 
@@ -185,21 +181,12 @@ describe('poll loop integration', () => {
       .run();
 
     // Insert messages from each destination with distinct thread IDs
-    insertMessage(
-      'm-discord',
-      { sender: 'Alice', text: 'from discord' },
-      { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread-1' },
-    );
-    insertMessage(
-      'm-slack',
-      { sender: 'Bob', text: 'from slack' },
-      { platformId: 'chan-2', channelType: 'slack', threadId: 'slack-thread-99' },
-    );
+    insertMessage('m-discord', { sender: 'Alice', text: 'from discord' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread-1' });
+    insertMessage('m-slack', { sender: 'Bob', text: 'from slack' }, { platformId: 'chan-2', channelType: 'slack', threadId: 'slack-thread-99' });
 
     // Agent replies to both destinations
-    const provider = new MockProvider(
-      {},
-      () => '<message to="discord-test">reply-d</message><message to="slack-test">reply-s</message>',
+    const provider = new MockProvider({}, () =>
+      '<message to="discord-test">reply-d</message><message to="slack-test">reply-s</message>',
     );
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
@@ -304,11 +291,7 @@ describe('poll loop integration', () => {
       .run();
 
     // Only insert a message from discord — slack-new has never sent anything
-    insertMessage(
-      'm1',
-      { sender: 'Alice', text: 'tell slack' },
-      { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread' },
-    );
+    insertMessage('m1', { sender: 'Alice', text: 'tell slack' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread' });
 
     const provider = new MockProvider({}, () => '<message to="slack-new">hello slack</message>');
     const controller = new AbortController();
@@ -327,16 +310,8 @@ describe('poll loop integration', () => {
 
   it('resolves most recent thread_id when destination has multiple inbound messages', async () => {
     // Two messages from same destination, different threads
-    insertMessage(
-      'm-old',
-      { sender: 'Alice', text: 'old' },
-      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-old' },
-    );
-    insertMessage(
-      'm-new',
-      { sender: 'Alice', text: 'new' },
-      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-new' },
-    );
+    insertMessage('m-old', { sender: 'Alice', text: 'old' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-old' });
+    insertMessage('m-new', { sender: 'Alice', text: 'new' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-new' });
 
     const provider = new MockProvider({}, () => '<message to="discord-test">reply</message>');
     const controller = new AbortController();
@@ -376,8 +351,7 @@ describe('poll loop integration', () => {
 
     const provider = new MockProvider(
       {},
-      () =>
-        '<internal>thinking about this...</internal><message to="discord-test">answer</message><internal>done thinking</internal>',
+      () => '<internal>thinking about this...</internal><message to="discord-test">answer</message><internal>done thinking</internal>',
     );
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
@@ -416,6 +390,7 @@ describe('poll loop integration', () => {
 
     await loopPromise.catch(() => {});
   });
+
 });
 
 // Helper: run poll loop until aborted or timeout
@@ -459,11 +434,7 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
   }
 
   it('reports each exchange to a provider that declares the hook', async () => {
-    insertMessage(
-      'm1',
-      { sender: 'Alice', text: 'please archive this' },
-      { platformId: 'chan-1', channelType: 'discord' },
-    );
+    insertMessage('m1', { sender: 'Alice', text: 'please archive this' }, { platformId: 'chan-1', channelType: 'discord' });
 
     const provider = new HookedMockProvider({}, () => '<message to="discord-test">archived answer</message>');
     const controller = new AbortController();
@@ -508,11 +479,7 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
   });
 
   it('a throwing hook never breaks delivery', async () => {
-    insertMessage(
-      'm1',
-      { sender: 'Alice', text: 'still deliver this' },
-      { platformId: 'chan-1', channelType: 'discord' },
-    );
+    insertMessage('m1', { sender: 'Alice', text: 'still deliver this' }, { platformId: 'chan-1', channelType: 'discord' });
 
     class ThrowingHookProvider extends MockProvider {
       onExchangeComplete(): void {
@@ -681,12 +648,10 @@ describe('poll loop — slash command during active query', () => {
   // linux/amd64 — all on bun 1.3.12.
   // TODO: reproduce with in-loop diagnostics (pending rows + ack states per
   // tick) on a throwaway branch and fix the underlying race, then un-skip.
-  it.skip('aborts the active query when /clear arrives as a follow-up', async () => {
-    insertMessage(
-      'm-active',
-      { sender: 'Alice', text: 'long running request' },
-      { platformId: 'chan-1', channelType: 'discord' },
-    );
+  it.skip(
+    'aborts the active query when /clear arrives as a follow-up',
+    async () => {
+    insertMessage('m-active', { sender: 'Alice', text: 'long running request' }, { platformId: 'chan-1', channelType: 'discord' });
 
     const provider = new BlockingProvider();
     const controller = new AbortController();
@@ -698,11 +663,7 @@ describe('poll loop — slash command during active query', () => {
     const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 20000);
 
     await waitFor(() => provider.queries === 1, 15000);
-    insertMessage(
-      'm-clear-active',
-      { sender: 'Alice', text: '/clear' },
-      { platformId: 'chan-1', channelType: 'discord' },
-    );
+    insertMessage('m-clear-active', { sender: 'Alice', text: '/clear' }, { platformId: 'chan-1', channelType: 'discord' });
 
     await waitFor(() => provider.aborts === 1, 15000);
     await waitFor(
@@ -716,7 +677,9 @@ describe('poll loop — slash command during active query', () => {
     expect(getPendingMessages()).toHaveLength(0);
 
     await loopPromise.catch(() => {});
-  }, 30000);
+    },
+    30000,
+  );
 });
 
 /**
