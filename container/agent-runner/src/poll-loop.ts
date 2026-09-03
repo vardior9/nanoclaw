@@ -6,7 +6,7 @@ import {
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { getLatestChatBefore, writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, getOutboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
@@ -17,6 +17,7 @@ import {
 } from './db/session-state.js';
 import {
   formatMessages,
+  formatPreviousAssistantMessage,
   extractRouting,
   categorizeMessage,
   isClearCommand,
@@ -241,7 +242,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    const currentPrompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    const firstSeq = Math.min(...keep.flatMap((message) => (message.seq == null ? [] : [message.seq])));
+    const previousAssistant =
+      config.continuationMode === 'fresh' &&
+      keep.some((message) => message.kind === 'chat-sdk') &&
+      Number.isFinite(firstSeq)
+        ? getLatestChatBefore(firstSeq)
+        : undefined;
+    const prompt = previousAssistant
+      ? `${formatPreviousAssistantMessage(previousAssistant.content)}\n\n${currentPrompt}`
+      : currentPrompt;
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 

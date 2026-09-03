@@ -23,7 +23,15 @@ export function isSessionEcho(msg: MessageInRow): boolean {
  */
 export type CommandCategory = 'admin' | 'filtered' | 'passthrough' | 'none';
 
-const ADMIN_COMMANDS = new Set(['/remote-control', '/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
+const ADMIN_COMMANDS = new Set([
+  '/remote-control',
+  '/clear',
+  '/compact',
+  '/context',
+  '/cost',
+  '/files',
+  '/upload-trace',
+]);
 const FILTERED_COMMANDS = new Set(['/help', '/login', '/logout', '/doctor', '/config', '/start']);
 
 export interface CommandInfo {
@@ -136,9 +144,7 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     inReplyTo: first?.id ?? null,
     // Echo rows riding along with a task must not disable one-door delivery:
     // taskRun as long as at least one task row and no non-task/non-echo row.
-    taskRun:
-      messages.some((m) => m.kind === 'task') &&
-      messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    taskRun: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
   };
 }
 
@@ -180,6 +186,22 @@ export function formatMessages(messages: MessageInRow[]): string {
   }
 
   return header + parts.join('\n\n');
+}
+
+/**
+ * Carry one bounded assistant turn across a deliberately fresh provider call.
+ * This preserves a question/reply pair without resuming provider memory or
+ * replaying the session transcript.
+ */
+export function formatPreviousAssistantMessage(content: string): string {
+  let text = content;
+  try {
+    const parsed = JSON.parse(content) as { text?: unknown };
+    if (typeof parsed.text === 'string') text = parsed.text;
+  } catch {
+    // Legacy rows may contain plain text.
+  }
+  return `<previous_assistant_message>${escapeXml(text.slice(0, 4000))}</previous_assistant_message>`;
 }
 
 function formatChatMessages(messages: MessageInRow[]): string {

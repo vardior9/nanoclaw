@@ -137,9 +137,7 @@ export function getMessageIdBySeq(seq: number): string | null {
   const inbound = getInboundDb();
 
   // Inbound messages: ID is already the platform message ID
-  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as
-    | { id: string }
-    | undefined;
+  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as { id: string } | undefined;
   if (inRow) return inRow.id;
 
   // Outbound messages: look up platform message ID from delivered table
@@ -186,4 +184,11 @@ export function getUndeliveredMessages(): MessageOutRow[] {
        ORDER BY timestamp ASC`,
     )
     .all() as MessageOutRow[];
+}
+
+/** Latest assistant chat emitted before an inbound batch, if any. */
+export function getLatestChatBefore(seq: number): MessageOutRow | undefined {
+  return getOutboundDb()
+    .prepare("SELECT * FROM messages_out WHERE kind = 'chat' AND seq < ? ORDER BY seq DESC LIMIT 1")
+    .get(seq) as MessageOutRow | undefined;
 }

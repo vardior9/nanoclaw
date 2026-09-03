@@ -6,3 +6,4 @@
 - 2026-09-02: Slack-card content is destination-wrapped, mention-free, and uses bare URLs; empty-body third-party APPROVED events are host-suppressed because they require no reviewer follow-up.
 - 2026-09-02: Closed PRs retain verdict-card render metadata; late clicks resolve as expired host-side instead of leaking a raw option index or waking the model.
 - 2026-09-03: Verdict rows are an explicit host state machine with one active exact-head card; only known green-CI summaries may advance silently while that card is pending, preserving human and finding-bearing activity.
+- 2026-09-03: Fresh provider calls carry only the latest assistant chat (bounded to 4,000 characters) when answering a human Chat SDK reply; this preserves a question/reply pair without replaying history or resuming provider memory, proven by the PR #49510 scope-choice regression.
