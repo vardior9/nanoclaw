@@ -124,6 +124,16 @@ export function markProcessing(ids: string[]): void {
   })();
 }
 
+/** Release a claimed batch so this container can retry it immediately. */
+export function releaseProcessing(ids: string[]): void {
+  if (ids.length === 0) return;
+  const db = getOutboundDb();
+  const stmt = db.prepare("DELETE FROM processing_ack WHERE message_id = ? AND status = 'processing'");
+  db.transaction(() => {
+    for (const id of ids) stmt.run(id);
+  })();
+}
+
 /** Mark messages as completed — updates processing_ack in outbound.db. */
 export function markCompleted(ids: string[]): void {
   if (ids.length === 0) return;

@@ -2,18 +2,23 @@
 
 Everything is local. The `pr-worktree` skill gives you `$WT` (working tree at the PR head) and `$BARE` (the shared clone with `origin/*` branches and `refs/pr/<n>/head`). No tarballs, no contents-API fetches, no `git clone`, and never any git command that touches the network (`fetch`, `pull`, `push`) — objects are pre-fetched by the host.
 
+Use `git --no-optional-locks -C "$WT" ...` for every read-only git command.
+This prevents status, diff, and history reads from refreshing the shared
+worktree index. When a command returns a running-command handle, wait on that
+same command rather than starting it again.
+
 ## Reading the diff
 
 ```bash
-BASE=$(git -C "$WT" merge-base "origin/<base_ref>" HEAD)
-git -C "$WT" diff --stat "$BASE"...HEAD          # shape of the PR
-git -C "$WT" diff "$BASE"...HEAD -- <paths>      # per-area, on demand
+BASE=$(git --no-optional-locks -C "$WT" merge-base "origin/<base_ref>" HEAD)
+git --no-optional-locks -C "$WT" diff --stat "$BASE"...HEAD          # shape of the PR
+git --no-optional-locks -C "$WT" diff "$BASE"...HEAD -- <paths>      # per-area, on demand
 ```
 
 Exclude generated noise from any full-diff read (keep the filenames from `--stat` in view so you can note skipped files):
 
 ```bash
-git -C "$WT" diff "$BASE"...HEAD -- . \
+git --no-optional-locks -C "$WT" diff "$BASE"...HEAD -- . \
   ':(exclude)*.lock' ':(exclude)package-lock.json' ':(exclude)pnpm-lock.yaml' \
   ':(exclude)go.sum' ':(exclude)*.min.js' ':(exclude)*.min.css' \
   ':(exclude)*.snap' ':(exclude)*.svg' ':(exclude)dist/**' ':(exclude)vendor/**'

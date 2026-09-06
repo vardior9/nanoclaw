@@ -492,6 +492,42 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
 });
 
 describe('poll loop — provider error recovery', () => {
+  it('retries a failed disposable turn once before surfacing an error', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'review this' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new FlakyProvider();
+    await runPollLoop({
+      provider: provider as unknown as MockProvider,
+      providerName: 'mock',
+      continuationMode: 'fresh',
+      cwd: '/tmp',
+    });
+
+    expect(provider.queries).toBe(2);
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('review complete');
+    expect(getPendingMessages()).toHaveLength(0);
+  });
+
+  it('surfaces one error after the disposable retry also fails', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'review this' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new CountingThrowingProvider('persistent failure');
+    await runPollLoop({
+      provider: provider as unknown as MockProvider,
+      providerName: 'mock',
+      continuationMode: 'fresh',
+      cwd: '/tmp',
+    });
+
+    expect(provider.queries).toBe(2);
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('Error: persistent failure');
+    expect(getPendingMessages()).toHaveLength(0);
+  });
+
   it('writes error to outbound and continues loop on provider throw', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'trigger error' }, { platformId: 'chan-1', channelType: 'discord' });
 
@@ -603,6 +639,30 @@ class ThrowingProvider {
         throw new Error(errorMessage);
       })(),
     };
+  }
+}
+
+/** Fails its first query and completes the retry. */
+class FlakyProvider extends ThrowingProvider {
+  queries = 0;
+
+  constructor() {
+    super('transient failure');
+  }
+
+  override query(input: { prompt: string; cwd: string }) {
+    this.queries += 1;
+    if (this.queries === 1) return super.query(input);
+    return new MockProvider({}, () => '<message to="discord-test">review complete</message>').query(input);
+  }
+}
+
+class CountingThrowingProvider extends ThrowingProvider {
+  queries = 0;
+
+  override query(input: { prompt: string; cwd: string }) {
+    this.queries += 1;
+    return super.query(input);
   }
 }
 

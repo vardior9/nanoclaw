@@ -23,6 +23,19 @@ git config --global --get-all safe.directory 2>/dev/null | grep -qx '\*' \
 git -C "$BARE" rev-parse --verify --quiet "$REF" >/dev/null \
   || { echo "no $REF in $BARE" >&2; exit 2; }
 
+# Serialize checkout updates for this PR. A killed helper releases the flock,
+# so an index.lock left after we acquire it belongs to the dead checkout and is
+# safe to remove.
+LOCK_FILE="$BARE/.pr-$N-worktree.lock"
+command -v flock >/dev/null 2>&1 || { echo "flock is required by the PR worktree helper" >&2; exit 1; }
+exec 9>"$LOCK_FILE"
+flock -w 300 9 || { echo "timed out waiting for the active PR $N checkout" >&2; exit 1; }
+
+ADMIN_DIR="$BARE/worktrees/pr-$N"
+if [ -f "$ADMIN_DIR/index.lock" ]; then
+  rm -f "$ADMIN_DIR/index.lock"
+fi
+
 if [ -d "$WT" ] && git -C "$WT" rev-parse --git-dir >/dev/null 2>&1; then
   git -C "$WT" checkout --quiet --detach "$REF"
 else

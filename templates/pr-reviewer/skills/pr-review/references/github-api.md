@@ -6,6 +6,14 @@ All calls go to `https://api.github.com` through the proxy. **Never set an Autho
 
 Code access is **never** via the API — you have the worktree. The API is for PR metadata, reviews, and comment threads only.
 
+The runtime guarantees `curl` and Node. Do not depend on `jq`, Python, Ruby,
+or PHP. When a response needs filtering, pipe curl into Node, for example:
+
+```bash
+curl -s https://api.github.com/repos/{o}/{r}/pulls/{n} | \
+  node -e 'let s=""; process.stdin.on("data", c => s += c).on("end", () => { const p=JSON.parse(s); console.log(JSON.stringify({title:p.title, head_sha:p.head.sha, changed_files:p.changed_files, additions:p.additions, deletions:p.deletions})) })'
+```
+
 ## Endpoints
 
 ```bash

@@ -10,8 +10,14 @@ The host maintains a shared clone per repo under `/workspace/extra/repos/<owner>
 One command, idempotent (creates the worktree, or moves an existing one to the current head):
 
 ```bash
-bash /home/node/.agents/skills/pr-worktree/bin/worktree.sh <owner>/<repo> <pr-number>
+bash /workspace/agent/.agents/skills/pr-worktree/bin/worktree.sh <owner>/<repo> <pr-number>
 ```
+
+The checkout can take several minutes for a large repository. If the command
+returns a running-command handle, wait on that same running command until it
+finishes. Never invoke the helper again while the first invocation is active;
+competing checkouts contend on the worktree index lock and waste the review
+budget.
 
 On success it prints two lines:
 

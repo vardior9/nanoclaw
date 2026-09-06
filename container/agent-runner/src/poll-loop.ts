@@ -2,6 +2,7 @@ import { findByName, getAllDestinations, type DestinationEntry } from './destina
 import {
   getPendingMessages,
   markProcessing,
+  releaseProcessing,
   markCompleted,
   markScriptSkipped,
   type MessageInRow,
@@ -98,6 +99,7 @@ export interface PollLoopConfig {
  * 6. Loop
  */
 export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+  let freshBatchRetryUsed = false;
   // Resume the agent's prior session from a previous container run if one
   // was persisted. The continuation is opaque to the poll-loop — the
   // provider decides how to use it (Claude resumes a .jsonl transcript,
@@ -311,6 +313,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         log(`Stale session detected (${continuation}) — clearing for next retry`);
         continuation = undefined;
         clearContinuation(config.providerName);
+      }
+
+      if (config.continuationMode === 'fresh' && !freshBatchRetryUsed) {
+        freshBatchRetryUsed = true;
+        releaseProcessing(processingIds);
+        log(`Retrying failed fresh batch once — ${processingIds.length} message(s)`);
+        continue;
       }
 
       // Write error response so the user knows something went wrong
