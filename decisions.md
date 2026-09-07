@@ -11,3 +11,4 @@
 - 2026-09-03: Focused Codex agents receive only persona plus explicit MCP instructions; plugins, apps, multi-agent support, NanoClaw memory hooks, and the duplicate user-level skill mount are disabled for the reviewer profile.
 - 2026-09-03: Fresh-mode turns are disposable containers that exit immediately after one batch; reviewer turns additionally stop at five minutes or after 20 tool calls.
 - 2026-09-03: Every dispatch decision records a deterministic wake id, decision, and reason; the same id is embedded in model prompts so Codex JSONL token counters can be joined back to individual wakes.
+- 2026-09-07: Reviewer turn budgets raised to fifteen minutes and 200 tool calls; the five-minute/40-call ceiling sized for disposable verdict batches was killing explicitly requested deep adversarial reviews.
