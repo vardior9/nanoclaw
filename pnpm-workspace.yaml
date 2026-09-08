@@ -4,5 +4,8 @@ onlyBuiltDependencies:
   - protobufjs
   - sharp
 
+overrides:
+  '@slack/socket-mode': 3.0.1
+
 pnpm:
   minimumReleaseAge: 4320
