@@ -113,7 +113,13 @@ export function parsePrKey(key: string): PrRef {
 
 export interface PrState {
   thread_ts: string;
+  /** Whether the previous dispatcher tick observed an active review request. */
+  review_requested?: boolean;
+  /** GitHub issue-event id for the last review request handled by the dispatcher. */
+  last_review_request_id?: string;
   head_sha: string;
+  /** Latest observed head; `head_sha` remains the head used for the last review wake. */
+  last_observed_head_sha?: string;
   /**
    * PR title as of the tick that opened tracking. The only host-side source
    * for the Slack agent-session title, which the reviewer module reads from
@@ -127,15 +133,32 @@ export interface PrState {
   last_nudge_at: string | null;
   nudges: number;
   /**
-   * PR's `updated_at` as of the last tick that saw it. Not in the task's
-   * literal state shape, but structurally required to detect "new activity
-   * without a new commit" (the alternative — diffing against `opened_at` —
-   * can't tell "already nudged this update" from "brand new update").
+   * PR's `updated_at` as of the last tick that saw it. This checkpoints
+   * non-waking activity and supports migration of older state entries.
    */
   last_seen_updated_at: string;
 }
 
 export type StateFile = Record<string, PrState>;
+
+export interface ReviewerWakeSnapshot {
+  reviewRequested: boolean | undefined;
+  reviewRequestId: string | undefined;
+  headSha: string;
+  updatedAt: string;
+}
+
+/** Head and activity changes are checkpoints; only request edges wake the reviewer. */
+export function reviewerWakeReason(
+  previous: ReviewerWakeSnapshot | null,
+  current: ReviewerWakeSnapshot,
+): 'initial_request' | 'review_rerequested' | null {
+  if (!current.reviewRequested) return null;
+  if (previous === null) return 'initial_request';
+  if (previous.reviewRequested === false) return 'review_rerequested';
+  if (previous.reviewRequestId === undefined || current.reviewRequestId === undefined) return null;
+  return previous.reviewRequestId !== current.reviewRequestId ? 'review_rerequested' : null;
+}
 
 export function loadState(): StateFile {
   try {
@@ -288,120 +311,26 @@ export function latestSelfReviewState(
   }
 }
 
-/** Classify whether post-review activity merits another model turn. */
-export function classifyReviewerActivity(
+export function latestReviewRequest(
   owner: string,
   repo: string,
   number: number,
-  sinceIso: string,
   selfLogin: string,
-):
-  | {
-      ok: true;
-      foreign: boolean;
-      actionable: boolean;
-      suppressionReason: 'self_only' | 'irrelevant_external' | null;
-      context: string;
-    }
-  | { ok: false; error: string } {
-  interface Activity {
-    author?: { login?: string } | null;
-    submittedAt?: string;
-    createdAt?: string;
-    body?: string;
-    state?: string;
-    path?: string;
-    line?: number | null;
-    url?: string;
-  }
-  interface Thread {
-    isResolved?: boolean;
-    path?: string;
-    line?: number | null;
-    comments?: { nodes?: Activity[] };
-  }
-  interface Response {
-    data?: {
-      repository?: {
-        pullRequest?: {
-          comments?: { nodes?: Activity[] };
-          reviews?: { nodes?: Activity[] };
-          reviewThreads?: { nodes?: Thread[] };
-        };
-      };
-    };
-  }
-  const query = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){comments(last:100){nodes{author{login}body createdAt url}}reviews(last:100){nodes{author{login}body state submittedAt url}}reviewThreads(first:100){nodes{isResolved path line comments(first:100){nodes{author{login}body createdAt url}}}}}}}`;
-  const response = runGh([
+): { ok: true; id: string | null } | { ok: false; error: string } {
+  const res = runGh([
     'api',
-    'graphql',
-    '-f',
-    `query=${query}`,
-    '-F',
-    `owner=${owner}`,
-    '-F',
-    `repo=${repo}`,
-    '-F',
-    `number=${number}`,
+    '--paginate',
+    `repos/${owner}/${repo}/issues/${number}/events?per_page=100`,
+    '--jq',
+    '.[] | select(.event=="review_requested") | [.id,.created_at,.requested_reviewer.login] | @tsv',
   ]);
-  if (!response.ok) return { ok: false, error: response.error };
-
-  try {
-    const pr = (JSON.parse(response.stdout) as Response).data?.repository?.pullRequest;
-    if (!pr) return { ok: false, error: 'GraphQL response did not contain the pull request' };
-    const login = selfLogin.toLowerCase();
-    const isNewForeign = (item: Activity): boolean => {
-      const author = item.author?.login;
-      return Boolean(author && author.toLowerCase() !== login && (item.createdAt ?? item.submittedAt ?? '') > sinceIso);
-    };
-    const mention = new RegExp(`(^|\\W)@${selfLogin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\W|$)`, 'i');
-    const foreign = [...(pr.comments?.nodes ?? []), ...(pr.reviews?.nodes ?? [])].filter(isNewForeign);
-    const actionable: Array<Activity & { path?: string; line?: number | null }> = [];
-    const actionableKeys = new Set<string>();
-    const addActionable = (item: Activity & { path?: string; line?: number | null }): void => {
-      const key = item.url ?? `${item.createdAt ?? item.submittedAt}:${item.author?.login}:${item.path}:${item.body}`;
-      if (!actionableKeys.has(key)) {
-        actionableKeys.add(key);
-        actionable.push(item);
-      }
-    };
-    foreign.filter((item) => mention.test(item.body ?? '')).forEach(addActionable);
-
-    for (const thread of pr.reviewThreads?.nodes ?? []) {
-      const comments = thread.comments?.nodes ?? [];
-      const root = comments[0];
-      const newComments = comments.filter(isNewForeign);
-      foreign.push(...newComments);
-      newComments
-        .filter((comment) => mention.test(comment.body ?? ''))
-        .forEach((comment) => addActionable({ ...comment, path: thread.path, line: thread.line }));
-      if (!thread.isResolved && root?.author?.login?.toLowerCase() === login) {
-        comments
-          .slice(1)
-          .filter(isNewForeign)
-          .forEach((reply) => addActionable({ ...reply, path: thread.path, line: thread.line }));
-      }
-    }
-
-    actionable.sort((a, b) => String(a.submittedAt ?? a.createdAt).localeCompare(String(b.submittedAt ?? b.createdAt)));
-    const context = actionable
-      .slice(-30)
-      .map((item) => {
-        const where = item.path ? `${item.path}${item.line ? `:${item.line}` : ''}` : (item.state ?? 'conversation');
-        const body = (item.body ?? '').replace(/\s+/g, ' ').trim().slice(0, 800) || '(no body)';
-        return `- ${item.author?.login} at ${where}: ${body}${item.url ? ` (${item.url})` : ''}`;
-      })
-      .join('\n');
-    return {
-      ok: true,
-      foreign: foreign.length > 0,
-      actionable: actionable.length > 0,
-      suppressionReason: actionable.length > 0 ? null : foreign.length > 0 ? 'irrelevant_external' : 'self_only',
-      context,
-    };
-  } catch (err) {
-    return { ok: false, error: `unparseable gh response: ${String(err)}` };
-  }
+  if (!res.ok) return { ok: false, error: res.error };
+  const last = res.stdout
+    .trim()
+    .split('\n')
+    .filter((line) => line.split('\t')[2]?.toLowerCase() === selfLogin.toLowerCase())
+    .at(-1);
+  return { ok: true, id: last?.split('\t', 1)[0] ?? null };
 }
 
 /** True when the host is already waiting on the owner for this exact reviewed head. */

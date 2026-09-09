@@ -4,7 +4,7 @@ GitHub PR reviewer for the Apiiro org. One Slack thread per PR (thread = session
 
 ## Architecture
 
-A host-side dispatcher (`scripts/pr-reviewer/dispatch.ts`, launchd, every 5 min) does everything the model shouldn't burn tokens on: PR discovery (GitHub search), bare-clone + PR-ref fetching under `repos/`, posting one Slack root message per PR in `#or-pr-reviewer`, injecting the kickoff into a fresh per-thread session via `data/cli.sock`, re-review/ping-pong nudges, overdue-verdict reminders, and worktree GC. The agent (this template) reviews one PR per session against a local worktree and posts findings via the GitHub REST API through the OneCLI gateway.
+A host-side dispatcher (`scripts/pr-reviewer/dispatch.ts`, launchd, every 5 min) does everything the model shouldn't burn tokens on: PR discovery (GitHub search), bare-clone + PR-ref fetching under `repos/`, injecting initial and explicitly re-requested reviews via `data/cli.sock`, overdue-verdict reminders, and worktree GC. Commits and comments are checkpointed without waking the model. The agent (this template) reviews one PR per session against a local worktree and posts findings via the GitHub REST API through the OneCLI gateway.
 
 ## Stamping
 

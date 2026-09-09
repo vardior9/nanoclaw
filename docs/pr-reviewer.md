@@ -12,11 +12,10 @@ timer** (`StartInterval 300`) — not a daemon.
 2. **New PR** — ensures a bare clone, fetches the PR's head + base refs, and
    injects a silent kickoff into a synthetic per-PR session. Slack materializes
    only when a human question or final-verdict card is emitted.
-3. **Known PR** — detects new pushes (re-review), new activity without a
-   push (fresh exact-delta re-review), external activity (fresh bounded
-   ping-pong context), overdue verdicts (one plain Slack reminder, no model
-   involvement), and closed/merged/review-request-cleared PRs (silent
-   worktree cleanup + state drop).
+3. **Known PR** — checkpoints pushes and activity without waking the model,
+   wakes only when review is explicitly re-requested, sends overdue verdict
+   reminders without model involvement, and silently cleans up closed, merged,
+   approved, or un-requested PRs.
 4. **GC** — LRU-evicts worktree checkouts over `MAX_WORKTREES_PER_REPO` /
    `MAX_WORKTREES_TOTAL` (worktrees are cheap to recreate from the bare
    clone, so this is safe even for a PR still under review).
@@ -69,12 +68,10 @@ MAX_WORKTREES_TOTAL=20
 ```
 
 `PR_SELF_LOGIN` is the GitHub identity shared by the human owner and the
-reviewer's PAT. Activity authored only by this login since the last baseline
-(i.e. the agent's own review posts) advances `last_seen_updated_at` silently
-instead of waking the agent — otherwise every review the agent posts would
-cost one no-op model turn on the next tick. Side effect: comments the owner
-makes directly on GitHub (rather than in the Slack thread) don't wake the
-agent either.
+reviewer's PAT. The dispatcher records whether this identity is currently
+requested for review. New commits and comments only advance its checkpoint;
+after the initial review, only a new GitHub `review_requested` event wakes the
+model again.
 
 The dispatcher only sends an overdue reminder when the latest bot message is
 an actual `Ready for final verdict` card. Routine lifecycle changes are logged
@@ -82,9 +79,8 @@ and cleaned up without another Slack reply. Findings and finding changes stay
 on GitHub; review progress, CI, and polling complete silently.
 
 Every reviewer and memory-consolidation batch starts a fresh Codex thread. A
-re-review does not reconstruct chat history: the host deterministically supplies
-the old/new SHA delta and unresolved reviewer-owned GitHub threads. Same-head
-activity wakes include only external items since the last checkpoint.
+re-requested review does not reconstruct chat history: the host deterministically
+supplies the old/new SHA delta and unresolved reviewer-owned GitHub threads.
 
 ## Slack agent-session titles and resolution
 
@@ -103,7 +99,7 @@ The agent emits a recommendation marker, which delivery replaces with a Slack
 card. Button clicks are consumed by the host and never become model input. The
 host re-reads GitHub's current head, compares it with the stored reviewed SHA,
 and only then submits `APPROVE` or `REQUEST_CHANGES` with `gh`. A stale click is
-rejected and waits for the dispatcher's fresh re-review. Successful submission
+rejected and waits for review to be explicitly re-requested. Successful submission
 gets one host-written receipt and moves the session to `closed` (approval) or
 `active` (changes requested).
 
@@ -164,9 +160,8 @@ switch:
 - CLI-socket injection (`data/cli.sock`, `src/channels/cli.ts`'s admin
   `to`-routed wire format) has no application-level acknowledgement — a
   successful write only means the socket accepted the line, not that
-  routing/access checks passed inside the host. If a kickoff or re-review
+  routing/access checks passed inside the host. If a kickoff or re-requested review
   message silently never reaches a thread, check `logs/nanoclaw.error.log`
   on the host side, not this script's log.
-- The "new activity" detection needs a per-PR `last_seen_updated_at`
-  timestamp beyond the four fields sketched in the original design note —
-  it's stored as an extra field on each `state.json` entry.
+- Request-edge detection and head/activity checkpoints are stored on each
+  `state.json` entry. Older entries migrate silently on their next tick.

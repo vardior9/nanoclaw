@@ -33,9 +33,10 @@ import {
   getPrDetail,
   getSlackThreadReplies,
   getUnresolvedSelfReviewThreads,
-  classifyReviewerActivity,
   injectCliEvent,
   isPendingVerdictMessage,
+  latestReviewRequest,
+  reviewerWakeReason,
   latestSelfReviewState,
   loadConfig,
   loadState,
@@ -86,7 +87,7 @@ function repoLogKey(owner: string, repo: string): string {
   return `${owner}/${repo}`;
 }
 
-function reviewerWakeId(kind: 'new_pr' | 'push' | 'activity', key: string, marker: string): string {
+function reviewerWakeId(kind: 'new_pr' | 'review_request' | 'push', key: string, marker: string): string {
   return `${kind}:${key}:${marker}`;
 }
 
@@ -123,7 +124,7 @@ function formatReReviewMessage(
 ): string {
   return [
     `Reviewer wake id: ${wakeId}`,
-    `New commits pushed to ${owner}/${repo}#${pr.number} — head is now ${pr.head.sha}.`,
+    `Review re-requested on ${owner}/${repo}#${pr.number} — head is now ${pr.head.sha}.`,
     `Re-fetch into the existing worktree at ${containerWorktreePath(owner, repo, pr.number)} (bare clone: ${containerBarePath(owner, repo)}) and re-review.`,
     '',
     'This is a fresh model thread. The host-calculated continuation context below is authoritative; do not search old model transcripts.',
@@ -132,22 +133,6 @@ function formatReReviewMessage(
     '',
     'Unresolved review threads opened by this reviewer:',
     unresolvedContext,
-    SLACK_NOTIFICATION_GATE,
-  ].join('\n');
-}
-
-function formatActivityMessage(
-  owner: string,
-  repo: string,
-  pr: PrDetail,
-  activityContext: string,
-  wakeId: string,
-): string {
-  return [
-    `Reviewer wake id: ${wakeId}`,
-    `New activity on ${owner}/${repo}#${pr.number} (comments/reviews, no new commits). Check whether a GitHub follow-up is warranted.`,
-    'This is a fresh model thread. Only the new external activity since the previous host checkpoint is included:',
-    activityContext || '(no external activity details)',
     SLACK_NOTIFICATION_GATE,
   ].join('\n');
 }
@@ -170,6 +155,7 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
   const { owner, repo } = ref;
   const pendingThread = pendingSlackReviewThreadId(ctx.cfg, key);
   const wakeId = reviewerWakeId('new_pr', key, pr.head.sha);
+  const reviewRequest = latestReviewRequest(owner, repo, pr.number, ctx.cfg.selfLogin);
 
   const clone = ensureBareCloneOnce(owner, repo, ctx);
   if (!clone.ok) {
@@ -205,7 +191,10 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
 
   const newState: PrState = {
     thread_ts: pendingThread,
+    review_requested: true,
+    last_review_request_id: reviewRequest.ok ? (reviewRequest.id ?? undefined) : undefined,
     head_sha: pr.head.sha,
+    last_observed_head_sha: pr.head.sha,
     pr_title: pr.title,
     base_ref: pr.base.ref,
     opened_at: new Date().toISOString(),
@@ -217,17 +206,24 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
   saveState(ctx.state);
 }
 
-async function handlePush(key: string, ref: PrRef, pr: PrDetail, known: PrState, ctx: TickCtx): Promise<void> {
+async function handleReviewRerequest(
+  key: string,
+  ref: PrRef,
+  pr: PrDetail,
+  known: PrState,
+  reviewRequestId: string | undefined,
+  ctx: TickCtx,
+): Promise<void> {
   const { owner, repo } = ref;
-  const wakeId = reviewerWakeId('push', key, pr.head.sha);
+  const wakeId = reviewerWakeId('review_request', key, reviewRequestId ?? pr.updated_at);
   const clone = ensureBareCloneOnce(owner, repo, ctx);
   if (!clone.ok) {
-    console.error(`[pr-reviewer] ${key}: bare clone unavailable, skipping re-review this tick: ${clone.error}`);
+    console.error(`[pr-reviewer] ${key}: bare clone unavailable, skipping re-request this tick: ${clone.error}`);
     return; // keep existing state, retry next tick
   }
   const fetched = fetchPrRefs(owner, repo, pr.number, pr.base.ref, ctx.args.dryRun);
   if (!fetched.ok) {
-    console.error(`[pr-reviewer] ${key}: could not fetch new commits: ${fetched.error}`);
+    console.error(`[pr-reviewer] ${key}: could not fetch re-requested review refs: ${fetched.error}`);
     return; // keep existing state, retry next tick
   }
 
@@ -257,58 +253,20 @@ async function handlePush(key: string, ref: PrRef, pr: PrDetail, known: PrState,
     console.error(`[pr-reviewer] ${key}: failed to inject re-review`, err);
     return;
   }
-  recordWakeDecision(wakeId, 'wake', 'new_head');
+  recordWakeDecision(wakeId, 'wake', 'review_rerequested');
 
   if (ctx.args.dryRun) return;
   ctx.state[key] = {
     ...known,
+    review_requested: true,
+    last_review_request_id: reviewRequestId,
     head_sha: pr.head.sha,
+    last_observed_head_sha: pr.head.sha,
     pr_title: pr.title,
     last_nudge_at: null,
     nudges: 0,
     last_seen_updated_at: pr.updated_at,
   };
-  saveState(ctx.state);
-}
-
-async function handleActivity(key: string, ref: PrRef, pr: PrDetail, known: PrState, ctx: TickCtx): Promise<void> {
-  // Only direct mentions and replies on this reviewer's unresolved threads
-  // merit another model turn. On lookup failure, fail open so a GitHub API
-  // outage cannot permanently hide a relevant author reply.
-  const activity = classifyReviewerActivity(
-    ref.owner,
-    ref.repo,
-    ref.number,
-    known.last_seen_updated_at,
-    ctx.cfg.selfLogin,
-  );
-  const wakeId = reviewerWakeId('activity', key, pr.updated_at);
-  if (activity.ok && !activity.actionable) {
-    recordWakeDecision(wakeId, 'suppress', activity.suppressionReason ?? 'irrelevant_external');
-    if (ctx.args.dryRun) {
-      console.log(`[dry-run] ${key}: ${activity.suppressionReason} — would advance baseline silently`);
-      return;
-    }
-    ctx.state[key] = { ...known, pr_title: pr.title, last_seen_updated_at: pr.updated_at };
-    saveState(ctx.state);
-    return;
-  }
-  try {
-    await injectCliEvent(
-      {
-        text: formatActivityMessage(ref.owner, ref.repo, pr, activity.ok ? activity.context : '', wakeId),
-        to: reviewDestination(ctx.cfg, known.thread_ts),
-        senderId: `slack:${ctx.cfg.ownerSlackId}`,
-      },
-      ctx.args.dryRun,
-    );
-  } catch (err) {
-    console.error(`[pr-reviewer] ${key}: failed to inject activity nudge`, err);
-    return; // last_seen_updated_at left unchanged so we retry next tick
-  }
-  recordWakeDecision(wakeId, 'wake', activity.ok ? 'relevant_activity' : 'classification_failed_open');
-  if (ctx.args.dryRun) return;
-  ctx.state[key] = { ...known, pr_title: pr.title, last_seen_updated_at: pr.updated_at };
   saveState(ctx.state);
 }
 
@@ -410,7 +368,7 @@ async function processPr(key: string, isDiscovered: boolean, ctx: TickCtx): Prom
     // the agent's own COMMENT reviews included — so a cleared request does
     // not mean the cycle is over. Close out only once our verdict is in
     // (APPROVE); after COMMENT or REQUEST_CHANGES the PR stays tracked for
-    // pushes and ping-pong until it merges/closes. A cleared request with
+    // an explicit re-request until it merges/closes. A cleared request with
     // no self review at all means the author genuinely un-requested us.
     const verdict = latestSelfReviewState(ref.owner, ref.repo, ref.number, ctx.cfg.selfLogin);
     if (!verdict.ok) {
@@ -425,21 +383,52 @@ async function processPr(key: string, isDiscovered: boolean, ctx: TickCtx): Prom
       await closeOutPr(key, ref, known, 'review-request-removed', ctx);
       return;
     }
-    // COMMENT / REQUEST_CHANGES / DISMISSED — fall through, keep tracking.
+    // COMMENT / REQUEST_CHANGES / DISMISSED — keep tracking for an explicit re-request.
   }
   if (pr.draft) return; // became draft mid-review — leave state untouched
 
-  if (!ctx.args.dryRun) await terminalizeSupersededVerdicts(ctx.cfg, key, pr.head.sha);
+  let reviewRequestId = known.last_review_request_id;
+  if (stillRequested) {
+    const reviewRequest = latestReviewRequest(ref.owner, ref.repo, ref.number, ctx.cfg.selfLogin);
+    if (!reviewRequest.ok) {
+      console.error(`[pr-reviewer] ${key}: failed to fetch review-request events: ${reviewRequest.error}`);
+      return;
+    }
+    reviewRequestId = reviewRequest.id ?? undefined;
+  }
+  const wakeReason = reviewerWakeReason(
+    {
+      reviewRequested: known.review_requested,
+      reviewRequestId: known.last_review_request_id,
+      headSha: known.last_observed_head_sha ?? known.head_sha,
+      updatedAt: known.last_seen_updated_at,
+    },
+    { reviewRequested: stillRequested, reviewRequestId, headSha: pr.head.sha, updatedAt: pr.updated_at },
+  );
+  if (wakeReason === 'review_rerequested') {
+    await handleReviewRerequest(key, ref, pr, known, reviewRequestId, ctx);
+    return;
+  }
 
-  if (pr.head.sha !== known.head_sha) {
-    await handlePush(key, ref, pr, known, ctx);
-    return;
+  const observedHead = known.last_observed_head_sha ?? known.head_sha;
+  if (!ctx.args.dryRun && pr.head.sha !== observedHead) {
+    await terminalizeSupersededVerdicts(ctx.cfg, key, pr.head.sha);
+    recordWakeDecision(reviewerWakeId('push', key, pr.head.sha), 'suppress', 'awaiting_review_rerequest');
   }
-  if (pr.updated_at !== known.last_seen_updated_at) {
-    await handleActivity(key, ref, pr, known, ctx);
-    return;
+
+  const current: PrState = {
+    ...known,
+    review_requested: stillRequested,
+    last_review_request_id: reviewRequestId,
+    last_observed_head_sha: pr.head.sha,
+    pr_title: pr.title,
+    last_seen_updated_at: pr.updated_at,
+  };
+  if (!ctx.args.dryRun && JSON.stringify(current) !== JSON.stringify(known)) {
+    ctx.state[key] = current;
+    saveState(ctx.state);
   }
-  await maybeRemind(key, ref, pr, known, ctx);
+  await maybeRemind(key, ref, pr, current, ctx);
 }
 
 /** LRU-evict worktree checkouts over the configured caps. Worktrees are

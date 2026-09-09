@@ -1,12 +1,36 @@
 import fs from 'fs';
-import os from 'os';
-import path from 'path';
 
 import { describe, expect, it } from 'vitest';
 
-import { classifyReviewerActivity, isPendingVerdictMessage } from './lib.js';
+import { isPendingVerdictMessage, reviewerWakeReason } from './lib.js';
 
 describe('PR reviewer notification policy', () => {
+  it('wakes only when review is first requested or re-requested', () => {
+    const current = (reviewRequested: boolean, reviewRequestId: string, headSha: string, updatedAt: string) => ({
+      reviewRequested,
+      reviewRequestId,
+      headSha,
+      updatedAt,
+    });
+
+    expect(reviewerWakeReason(null, current(true, 'request-1', 'a', '1'))).toBe('initial_request');
+    expect(reviewerWakeReason(current(true, 'request-1', 'a', '1'), current(true, 'request-1', 'b', '2'))).toBeNull();
+    expect(reviewerWakeReason(current(true, 'request-1', 'a', '1'), current(false, 'request-1', 'b', '2'))).toBeNull();
+    expect(reviewerWakeReason(current(false, 'request-1', 'b', '2'), current(false, 'request-1', 'c', '3'))).toBeNull();
+    expect(reviewerWakeReason(current(false, 'request-1', 'b', '2'), current(true, 'request-2', 'c', '3'))).toBe(
+      'review_rerequested',
+    );
+    expect(reviewerWakeReason(current(true, 'request-1', 'b', '2'), current(true, 'request-2', 'c', '3'))).toBe(
+      'review_rerequested',
+    );
+    expect(
+      reviewerWakeReason(
+        { reviewRequested: undefined, reviewRequestId: undefined, headSha: 'b', updatedAt: '2' },
+        current(true, 'request-2', 'c', '3'),
+      ),
+    ).toBeNull();
+  });
+
   it('only treats an explicit final-verdict request as reminder-eligible', () => {
     expect(isPendingVerdictMessage('<@U1> Ready for final verdict')).toBe(true);
     expect(isPendingVerdictMessage('No follow-up warranted; required CI passed.')).toBe(false);
@@ -31,76 +55,5 @@ describe('PR reviewer notification policy', () => {
     expect(persona).toContain('one final-verdict card is needed');
     expect(dispatcher).toContain('pendingSlackReviewThreadId');
     expect(dispatcher).not.toContain('postRootMessage');
-  });
-
-  it('suppresses an empty approval-only review event', () => {
-    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-activity-gh-'));
-    const ghPath = path.join(bin, 'gh');
-    fs.writeFileSync(
-      ghPath,
-      `#!/bin/sh\nprintf '%s' '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[]},"reviews":{"nodes":[{"author":{"login":"teammate"},"state":"APPROVED","body":"","submittedAt":"2026-09-02T08:00:00Z"}]},"reviewThreads":{"nodes":[]}}}}}'\n`,
-      { mode: 0o755 },
-    );
-    const oldPath = process.env.PATH;
-    process.env.PATH = `${bin}:${oldPath}`;
-    try {
-      expect(classifyReviewerActivity('apiiro', 'guardian', 123, '2026-09-02T07:00:00Z', 'vardior9')).toEqual({
-        ok: true,
-        foreign: true,
-        actionable: false,
-        suppressionReason: 'irrelevant_external',
-        context: '',
-      });
-    } finally {
-      process.env.PATH = oldPath;
-      fs.rmSync(bin, { recursive: true, force: true });
-    }
-  });
-
-  it('suppresses unrelated automation and human activity', () => {
-    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-activity-gh-'));
-    const ghPath = path.join(bin, 'gh');
-    fs.writeFileSync(
-      ghPath,
-      `#!/bin/sh\nprintf '%s' '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[{"author":{"login":"apiirobot"},"body":"CI passed","createdAt":"2026-09-02T08:00:00Z"},{"author":{"login":"teammate"},"body":"Looks good","createdAt":"2026-09-02T08:01:00Z"}]},"reviews":{"nodes":[]},"reviewThreads":{"nodes":[]}}}}}'\n`,
-      { mode: 0o755 },
-    );
-    const oldPath = process.env.PATH;
-    process.env.PATH = `${bin}:${oldPath}`;
-    try {
-      expect(classifyReviewerActivity('apiiro', 'lim', 123, '2026-09-02T07:00:00Z', 'vardior9')).toMatchObject({
-        ok: true,
-        foreign: true,
-        actionable: false,
-        suppressionReason: 'irrelevant_external',
-      });
-    } finally {
-      process.env.PATH = oldPath;
-      fs.rmSync(bin, { recursive: true, force: true });
-    }
-  });
-
-  it('wakes only for direct mentions and replies on unresolved self-authored threads', () => {
-    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-activity-gh-'));
-    const ghPath = path.join(bin, 'gh');
-    fs.writeFileSync(
-      ghPath,
-      `#!/bin/sh\nprintf '%s' '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[{"author":{"login":"author"},"body":"@vardior9 please reconsider","createdAt":"2026-09-02T08:00:00Z","url":"https://example/direct"}]},"reviews":{"nodes":[]},"reviewThreads":{"nodes":[{"isResolved":false,"path":"src/a.ts","line":12,"comments":{"nodes":[{"author":{"login":"vardior9"},"body":"finding","createdAt":"2026-09-02T06:00:00Z"},{"author":{"login":"author"},"body":"fixed in latest","createdAt":"2026-09-02T08:01:00Z","url":"https://example/reply"}]}},{"isResolved":true,"path":"src/b.ts","line":3,"comments":{"nodes":[{"author":{"login":"vardior9"},"body":"old","createdAt":"2026-09-02T06:00:00Z"},{"author":{"login":"author"},"body":"resolved reply","createdAt":"2026-09-02T08:02:00Z"}]}}]}}}}}'\n`,
-      { mode: 0o755 },
-    );
-    const oldPath = process.env.PATH;
-    process.env.PATH = `${bin}:${oldPath}`;
-    try {
-      const result = classifyReviewerActivity('apiiro', 'lim', 123, '2026-09-02T07:00:00Z', 'vardior9');
-      expect(result).toMatchObject({ ok: true, foreign: true, actionable: true, suppressionReason: null });
-      if (result.ok) {
-        expect(result.context).toContain('@vardior9 please reconsider');
-        expect(result.context).toContain('src/a.ts:12: fixed in latest');
-        expect(result.context).not.toContain('resolved reply');
-      }
-    } finally {
-      process.env.PATH = oldPath;
-      fs.rmSync(bin, { recursive: true, force: true });
-    }
   });
 });
