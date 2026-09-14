@@ -35,6 +35,7 @@ export interface Config {
   remindAfterHours: number;
   maxNudges: number;
   bootstrapPerTick: number;
+  maxOutstandingReviews: number;
   maxWorktreesPerRepo: number;
   maxWorktreesTotal: number;
   slackBotToken: string;
@@ -49,6 +50,7 @@ const ENV_KEYS = [
   'REMIND_AFTER_HOURS',
   'MAX_NUDGES',
   'PR_BOOTSTRAP_PER_TICK',
+  'PR_MAX_OUTSTANDING_REVIEWS',
   'MAX_WORKTREES_PER_REPO',
   'MAX_WORKTREES_TOTAL',
   'SLACK_BOT_TOKEN',
@@ -81,10 +83,50 @@ export function loadConfig(): Config {
     remindAfterHours: intOr(env.REMIND_AFTER_HOURS, 24),
     maxNudges: intOr(env.MAX_NUDGES, 1),
     bootstrapPerTick: intOr(env.PR_BOOTSTRAP_PER_TICK, 2),
+    maxOutstandingReviews: intOr(env.PR_MAX_OUTSTANDING_REVIEWS, 1),
     maxWorktreesPerRepo: intOr(env.MAX_WORKTREES_PER_REPO, 6),
     maxWorktreesTotal: intOr(env.MAX_WORKTREES_TOTAL, 20),
     slackBotToken,
   };
+}
+
+/**
+ * Count review messages that have been routed but not terminally acknowledged.
+ *
+ * The dispatcher is independent from the host's container lifecycle. Without
+ * this check, a provider outage can accumulate one session per PR and the host
+ * will start all of them together when the provider recovers.
+ */
+export function countOutstandingReviewMessages(cfg: Config, dataDir = DATA_DIR): number {
+  const central = new Database(path.join(dataDir, 'v2.db'), { readonly: true, fileMustExist: true });
+  let sessions: Array<{ id: string; agent_group_id: string }>;
+  try {
+    sessions = central
+      .prepare(
+        `SELECT id, agent_group_id
+           FROM sessions
+          WHERE thread_id LIKE ?`,
+      )
+      .all(`slack:${cfg.reviewsDm}:pending-pr-%`) as Array<{ id: string; agent_group_id: string }>;
+  } finally {
+    central.close();
+  }
+
+  let outstanding = 0;
+  for (const session of sessions) {
+    const inboundPath = path.join(dataDir, 'v2-sessions', session.agent_group_id, session.id, 'inbound.db');
+    if (!fs.existsSync(inboundPath)) continue;
+    const inbound = new Database(inboundPath, { readonly: true, fileMustExist: true });
+    try {
+      const row = inbound
+        .prepare("SELECT COUNT(*) AS count FROM messages_in WHERE status IN ('pending', 'processing')")
+        .get() as { count: number };
+      outstanding += row.count;
+    } finally {
+      inbound.close();
+    }
+  }
+  return outstanding;
 }
 
 // ---------------------------------------------------------------------------

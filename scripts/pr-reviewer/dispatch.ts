@@ -26,6 +26,7 @@ import {
   acquireLock,
   containerBarePath,
   containerWorktreePath,
+  countOutstandingReviewMessages,
   ensureBareClone,
   fetchPrRefs,
   getBotUserId,
@@ -81,6 +82,7 @@ interface TickCtx {
   state: StateFile;
   bootstrapCount: number;
   failedRepoClones: Set<string>;
+  availableWakeSlots: number;
 }
 
 function repoLogKey(owner: string, repo: string): string {
@@ -157,6 +159,11 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
   const wakeId = reviewerWakeId('new_pr', key, pr.head.sha);
   const reviewRequest = latestReviewRequest(owner, repo, pr.number, ctx.cfg.selfLogin);
 
+  if (ctx.availableWakeSlots <= 0) {
+    console.log(`[pr-reviewer] ${key}: deferring wake (review capacity full)`);
+    return;
+  }
+
   const clone = ensureBareCloneOnce(owner, repo, ctx);
   if (!clone.ok) {
     console.error(`[pr-reviewer] ${key}: could not set up local clone: ${clone.error}`);
@@ -183,6 +190,7 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
   }
 
   recordWakeDecision(wakeId, 'wake', 'new_pr');
+  ctx.availableWakeSlots--;
 
   if (ctx.args.dryRun) {
     console.log(`[dry-run] ${key}: would bootstrap silently in ${pendingThread}`);
@@ -216,6 +224,10 @@ async function handleReviewRerequest(
 ): Promise<void> {
   const { owner, repo } = ref;
   const wakeId = reviewerWakeId('review_request', key, reviewRequestId ?? pr.updated_at);
+  if (ctx.availableWakeSlots <= 0) {
+    console.log(`[pr-reviewer] ${key}: deferring wake (review capacity full)`);
+    return;
+  }
   const clone = ensureBareCloneOnce(owner, repo, ctx);
   if (!clone.ok) {
     console.error(`[pr-reviewer] ${key}: bare clone unavailable, skipping re-request this tick: ${clone.error}`);
@@ -254,6 +266,7 @@ async function handleReviewRerequest(
     return;
   }
   recordWakeDecision(wakeId, 'wake', 'review_rerequested');
+  ctx.availableWakeSlots--;
 
   if (ctx.args.dryRun) return;
   ctx.state[key] = {
@@ -492,6 +505,14 @@ function gcWorktrees(cfg: Config, dryRun: boolean): void {
 async function tick(cfg: Config, args: Args): Promise<void> {
   const state = loadState();
 
+  let outstandingReviews: number;
+  try {
+    outstandingReviews = countOutstandingReviewMessages(cfg);
+  } catch (err) {
+    console.error('[pr-reviewer] could not inspect outstanding review work; refusing new wakes', err);
+    return;
+  }
+
   let discovered: PrRef[];
   if (args.once) {
     discovered = [parsePrKey(args.once)];
@@ -509,7 +530,14 @@ async function tick(cfg: Config, args: Args): Promise<void> {
     ? [prKey(discovered[0])]
     : Array.from(new Set([...discoveredKeys, ...Object.keys(state)])).sort();
 
-  const ctx: TickCtx = { cfg, args, state, bootstrapCount: 0, failedRepoClones: new Set() };
+  const ctx: TickCtx = {
+    cfg,
+    args,
+    state,
+    bootstrapCount: 0,
+    failedRepoClones: new Set(),
+    availableWakeSlots: Math.max(0, cfg.maxOutstandingReviews - outstandingReviews),
+  };
 
   for (const key of keys) {
     try {

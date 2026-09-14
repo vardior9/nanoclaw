@@ -1,8 +1,17 @@
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
-import { describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
+import { afterEach, describe, expect, it } from 'vitest';
 
-import { isPendingVerdictMessage, reviewerWakeReason } from './lib.js';
+import { countOutstandingReviewMessages, isPendingVerdictMessage, reviewerWakeReason, type Config } from './lib.js';
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 describe('PR reviewer notification policy', () => {
   it('wakes only when review is first requested or re-requested', () => {
@@ -36,6 +45,32 @@ describe('PR reviewer notification policy', () => {
     expect(isPendingVerdictMessage('No follow-up warranted; required CI passed.')).toBe(false);
     expect(isPendingVerdictMessage('One blocking issue remains.')).toBe(false);
     expect(isPendingVerdictMessage(undefined)).toBe(false);
+  });
+
+  it('counts only unfinished native reviewer messages', () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-capacity-'));
+    tempDirs.push(dataDir);
+    const central = new Database(path.join(dataDir, 'v2.db'));
+    central.exec('CREATE TABLE sessions (id TEXT, agent_group_id TEXT, thread_id TEXT)');
+    central
+      .prepare('INSERT INTO sessions VALUES (?, ?, ?)')
+      .run('review-session', 'reviewer', 'slack:D1:pending-pr-YWNtZS93aWRnZXRzIzE');
+    central.prepare('INSERT INTO sessions VALUES (?, ?, ?)').run('chat-session', 'reviewer', 'slack:D1:ordinary');
+    central.close();
+
+    for (const [session, status] of [
+      ['review-session', 'pending'],
+      ['chat-session', 'pending'],
+    ] as const) {
+      const dir = path.join(dataDir, 'v2-sessions', 'reviewer', session);
+      fs.mkdirSync(dir, { recursive: true });
+      const inbound = new Database(path.join(dir, 'inbound.db'));
+      inbound.exec('CREATE TABLE messages_in (status TEXT)');
+      inbound.prepare('INSERT INTO messages_in VALUES (?)').run(status);
+      inbound.close();
+    }
+
+    expect(countOutstandingReviewMessages({ reviewsDm: 'D1' } as Config, dataDir)).toBe(1);
   });
 
   it('keeps findings GitHub-only and limits Slack to the three allowed cases', () => {
