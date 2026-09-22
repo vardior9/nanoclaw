@@ -4,6 +4,7 @@ All notable changes to NanoClaw will be documented in this file.
 
 ## [Unreleased]
 
+- **`/add-codex` now pins `@openai/codex` 0.155.1.** From 0.147.0, Codex starts a turn after about one second without the tools of any MCP server still starting, so a turn could report completed with nothing sent. The Codex provider now waits for every MCP server to finish starting (Codex gives up on one after 30 seconds, as 0.146.0 did) and requires NanoClaw's own tool server: if that server cannot start, the message fails with an error instead of running without its tools. **Model change:** Codex groups with no model set start new threads on `gpt-6-astra`, 0.155.1's default (0.146.0 defaulted to `gpt-5.6-sol`); existing threads keep the model they started on. To stay on the old model, set it per group with `ncl groups config update --id <group-id> --model gpt-5.6-sol`, then `ncl groups restart --id <group-id>`. `NANOCLAW_DEFAULT_MODEL` would also hold it, but it applies to Claude groups too. Existing codex installs get the new pin and the provider fix together from `/update-nanoclaw`, which rebuilds the agent image on installs that build their own.
 - **New NanoClaw installs now use OneCLI gateway 1.41.0.** Existing 1.36.0 gateways remain compatible because NanoClaw does not depend on any 1.41-only behavior. See [the OneCLI upgrade guide](docs/onecli-upgrades.md) to upgrade an existing gateway.
 
 ## [2.2.0] - 2026-08-13
