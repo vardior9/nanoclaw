@@ -376,6 +376,11 @@ export function attachCodexAutoApproval(server: AppServer): void {
   });
 }
 
+// The built-in MCP server's key, set by the agent-runner entry point
+// (container/agent-runner/src/index.ts). It carries send_file, scheduling and
+// the rest of NanoClaw's tools, so a turn without it is a turn that cannot act.
+const NANOCLAW_MCP_SERVER = 'nanoclaw';
+
 export function writeCodexConfigToml(
   servers: Record<string, McpServerConfig>,
   memorySessionHook: CodexMemorySessionHook,
@@ -391,6 +396,11 @@ export function writeCodexConfigToml(
     `sandbox_mode = ${tomlBasicString(CODEX_SANDBOX_MODE)}`,
     `approval_policy = ${tomlBasicString(CODEX_APPROVAL_POLICY)}`,
     `project_doc_max_bytes = ${CODEX_PROJECT_DOC_MAX_BYTES}`,
+    // Since 0.147.0 Codex gives MCP servers ~1s before the first turn and runs
+    // the turn without the tools of any server still starting. Every query
+    // spawns a fresh app-server, so every server starts cold. 0 restores the
+    // wait-until-ready behaviour, bounded by each server's startup timeout.
+    'mcp_optional_startup_grace_ms = 0',
   ];
   if (opts.model) lines.push(`model = ${tomlBasicString(opts.model)}`);
   if (opts.effort) lines.push(`model_reasoning_effort = ${tomlBasicString(opts.effort)}`);
@@ -414,6 +424,9 @@ export function writeCodexConfigToml(
   for (const [name, config] of Object.entries(servers)) {
     const tomlName = tomlKey(name);
     lines.push(`[mcp_servers.${tomlName}]`);
+    // Fail thread start/resume loudly if the built-in server cannot start,
+    // instead of running the turn without it. Other servers stay optional.
+    if (name === NANOCLAW_MCP_SERVER) lines.push('required = true');
     if (config.type === 'http') {
       lines.push(`url = ${tomlBasicString(config.url)}`);
       if (config.headers && Object.keys(config.headers).length > 0) {
