@@ -32,6 +32,7 @@ import { log } from '../../log.js';
 import { openInboundDb } from '../../session-manager.js';
 import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
 import type { Session } from '../../types.js';
+import './dispatcher-watchdog.js';
 
 const TABLE = 'reviewer_agent_session_aliases';
 const VERDICTS_TABLE = 'reviewer_verdict_requests';

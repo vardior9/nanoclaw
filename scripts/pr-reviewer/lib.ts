@@ -19,6 +19,7 @@ export const REPOS_ROOT = path.join(PROJECT_ROOT, 'repos');
 export const STATE_DIR = path.join(PROJECT_ROOT, 'data', 'pr-reviewer');
 export const STATE_PATH = path.join(STATE_DIR, 'state.json');
 export const LOCK_PATH = path.join(STATE_DIR, 'dispatch.lock');
+export const LAST_TICK_PATH = path.join(STATE_DIR, 'last-tick');
 export const STALE_LOCK_MS = 15 * 60 * 1000;
 
 // ---------------------------------------------------------------------------

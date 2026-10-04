@@ -22,6 +22,7 @@ import {
   type PrRef,
   type PrState,
   type StateFile,
+  LAST_TICK_PATH,
   REPOS_ROOT,
   acquireLock,
   containerBarePath,
@@ -567,6 +568,7 @@ async function main(): Promise<void> {
   }
   try {
     await tick(cfg, args);
+    if (!args.dryRun) fs.writeFileSync(LAST_TICK_PATH, new Date().toISOString());
   } finally {
     releaseLock();
   }
