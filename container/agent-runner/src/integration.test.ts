@@ -26,7 +26,7 @@ afterEach(() => {
 function insertMessage(
   id: string,
   content: object,
-  opts?: { platformId?: string; channelType?: string; threadId?: string; kind?: 'chat' | 'chat-sdk'; seq?: number },
+  opts?: { platformId?: string; channelType?: string; threadId?: string; kind?: 'chat' | 'chat-sdk' | 'task'; seq?: number },
 ) {
   getInboundDb()
     .prepare(
@@ -77,6 +77,26 @@ describe('poll loop integration', () => {
 
     expect(provider.continuations).toEqual([undefined, undefined]);
     expect(getContinuation('mock')).toBeUndefined();
+  });
+
+  it('exits a fresh container when every task is gated by its script', async () => {
+    let queries = 0;
+    class CountingProvider extends MockProvider {
+      override query(input: QueryInput): AgentQuery {
+        queries++;
+        return super.query(input);
+      }
+    }
+
+    insertMessage(
+      'gated-task',
+      { prompt: 'consolidate', script: `printf '{"wakeAgent":false}\\n'` },
+      { platformId: 'chan-1', channelType: 'discord', kind: 'task' },
+    );
+    await runPollLoop({ provider: new CountingProvider({}, () => ''), providerName: 'mock', continuationMode: 'fresh', cwd: '/tmp' });
+
+    expect(queries).toBe(0);
+    expect(getPendingMessages()).toHaveLength(0);
   });
 
   it('carries the immediately preceding assistant question into a fresh human reply', async () => {

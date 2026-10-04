@@ -239,6 +239,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     if (keep.length === 0) {
       log(`All ${normalMessages.length} non-command message(s) gated by script, skipping query`);
+      if (config.continuationMode === 'fresh') {
+        log('Fresh turn gated — exiting disposable container');
+        return;
+      }
       continue;
     }
 
