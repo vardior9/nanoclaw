@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MessageInRow } from '../db/messages-in.js';
@@ -6,6 +6,8 @@ import { touchHeartbeat } from '../db/connection.js';
 
 const SCRIPT_TIMEOUT_MS = 30_000;
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
+const SCRIPT_KILL_GRACE_MS = 2_000;
+const SCRIPT_KILL_REAP_MS = 1_000;
 
 export interface ScriptResult {
   wakeAgent: boolean;
@@ -16,51 +18,141 @@ function log(msg: string): void {
   console.error(`[task-script] ${msg}`);
 }
 
-export async function runScript(script: string, taskId: string): Promise<ScriptResult | null> {
+export async function runScript(
+  script: string,
+  taskId: string,
+  timeoutMs: number = SCRIPT_TIMEOUT_MS,
+): Promise<ScriptResult | null> {
   const scriptPath = path.join('/tmp', `task-script-${taskId}.sh`);
   fs.writeFileSync(scriptPath, script, { mode: 0o755 });
 
   return new Promise((resolve) => {
-    execFile(
-      'bash',
-      [scriptPath],
-      { timeout: SCRIPT_TIMEOUT_MS, maxBuffer: SCRIPT_MAX_BUFFER, env: process.env },
-      (error, stdout, stderr) => {
-        try {
-          fs.unlinkSync(scriptPath);
-        } catch {
-          /* best-effort cleanup */
-        }
+    const child = spawn('bash', [scriptPath], { detached: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
 
-        if (stderr) {
-          log(`[${taskId}] stderr: ${stderr.slice(0, 500)}`);
-        }
+    const out = { stdout: [] as Buffer[], stderr: [] as Buffer[] };
+    const bytes = { stdout: 0, stderr: 0 };
+    let killed = false;
+    let overflow: 'stdout' | 'stderr' | null = null;
+    let exitCode: number | null = null;
+    let exitSignal: NodeJS.Signals | null = null;
 
-        if (error) {
-          log(`[${taskId}] error: ${error.message}`);
+    const signalGroup = (signal: NodeJS.Signals | 0): boolean => {
+      try {
+        process.kill(-child.pid!, signal);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    let closed = false;
+    let groupGone = false;
+    let poll: ReturnType<typeof setInterval> | undefined;
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    const tryFinish = (): void => {
+      if (closed && (!killed || groupGone)) finish(null);
+    };
+    const endGroup = (): void => {
+      clearInterval(poll);
+      clearTimeout(graceTimer);
+      groupGone = true;
+      child.stdout.destroy();
+      child.stderr.destroy();
+      tryFinish();
+    };
+    const killGroup = (): void => {
+      if (killed) return;
+      killed = true;
+      if (!signalGroup('SIGTERM')) return endGroup();
+      poll = setInterval(() => {
+        if (!signalGroup(0)) endGroup();
+      }, 100);
+      graceTimer = setTimeout(() => {
+        signalGroup('SIGKILL');
+        graceTimer = setTimeout(() => {
+          log(`[${taskId}] process group still alive ${SCRIPT_KILL_REAP_MS}ms after SIGKILL; moving on`);
+          endGroup();
+        }, SCRIPT_KILL_REAP_MS);
+      }, SCRIPT_KILL_GRACE_MS);
+    };
+
+    const timer = setTimeout(killGroup, timeoutMs);
+
+    const collect = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+      if (killed) return;
+      out[stream].push(chunk);
+      bytes[stream] += chunk.length;
+      if (!overflow && bytes[stream] > SCRIPT_MAX_BUFFER) {
+        overflow = stream;
+        killGroup();
+      }
+    };
+    child.stdout.on('data', collect('stdout'));
+    child.stderr.on('data', collect('stderr'));
+
+    let settled = false;
+    const finish = (error: Error | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poll);
+      clearTimeout(graceTimer);
+      try {
+        fs.unlinkSync(scriptPath);
+      } catch {
+
+      }
+
+      const stdout = Buffer.concat(out.stdout).toString('utf8');
+      const stderr = Buffer.concat(out.stderr).toString('utf8');
+      if (stderr) {
+        log(`[${taskId}] stderr: ${stderr.slice(0, 500)}`);
+      }
+
+      if (error) {
+        log(`[${taskId}] error: ${error.message}`);
+        return resolve(null);
+      }
+      if (overflow) {
+        log(`[${taskId}] error: ${overflow} maxBuffer length exceeded`);
+        return resolve(null);
+      }
+      if (killed) {
+        log(`[${taskId}] timed out after ${timeoutMs}ms and was killed; output discarded`);
+        return resolve(null);
+      }
+      if (exitCode !== 0) {
+        const cause = exitCode === null ? `signal ${exitSignal}` : `exit code ${exitCode}`;
+        log(`[${taskId}] error: Command failed (${cause}): bash ${scriptPath}`);
+        return resolve(null);
+      }
+
+      const lines = stdout.trim().split('\n');
+      const lastLine = lines[lines.length - 1];
+      if (!lastLine) {
+        log(`[${taskId}] no output`);
+        return resolve(null);
+      }
+
+      try {
+        const result = JSON.parse(lastLine);
+        if (typeof result.wakeAgent !== 'boolean') {
+          log(`[${taskId}] output missing wakeAgent boolean: ${lastLine.slice(0, 200)}`);
           return resolve(null);
         }
+        resolve(result as ScriptResult);
+      } catch {
+        log(`[${taskId}] output is not valid JSON: ${lastLine.slice(0, 200)}`);
+        resolve(null);
+      }
+    };
 
-        const lines = stdout.trim().split('\n');
-        const lastLine = lines[lines.length - 1];
-        if (!lastLine) {
-          log(`[${taskId}] no output`);
-          return resolve(null);
-        }
-
-        try {
-          const result = JSON.parse(lastLine);
-          if (typeof result.wakeAgent !== 'boolean') {
-            log(`[${taskId}] output missing wakeAgent boolean: ${lastLine.slice(0, 200)}`);
-            return resolve(null);
-          }
-          resolve(result as ScriptResult);
-        } catch {
-          log(`[${taskId}] output is not valid JSON: ${lastLine.slice(0, 200)}`);
-          resolve(null);
-        }
-      },
-    );
+    child.on('error', finish);
+    child.on('close', (code, signal) => {
+      exitCode = code;
+      exitSignal = signal;
+      closed = true;
+      tryFinish();
+    });
   });
 }
 
