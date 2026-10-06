@@ -4,9 +4,9 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError, processQuery } from './poll-loop.js';
+import { isCorruptionError, processQuery, runPollLoop } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
-import type { AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -220,7 +220,13 @@ describe('origin metadata (from= attribute)', () => {
       .run(name, name, channelType, platformId);
   }
 
-  function insertWithRouting(id: string, kind: string, content: object, channelType: string | null, platformId: string | null): void {
+  function insertWithRouting(
+    id: string,
+    kind: string,
+    content: object,
+    channelType: string | null,
+    platformId: string | null,
+  ): void {
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
@@ -451,7 +457,7 @@ describe('error result with no <message> envelope', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe(budgetText);
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
     expect(out[0].platform_id).toBe('chan-1');
     expect(out[0].channel_type).toBe('discord');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
@@ -501,9 +507,9 @@ const TASK_ROUTING = {
 
 function taskLogRows(): Array<{ text: string }> {
   return (
-    getOutboundDb()
-      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
-      .all() as Array<{ content: string }>
+    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
+      content: string;
+    }>
   ).map((r) => JSON.parse(r.content) as { text: string });
 }
 
@@ -584,4 +590,87 @@ describe('task-run turn wiring (real processQuery)', () => {
     // slow runners the test died as a mute timeout instead of reaching the
     // diagnostic throw above (observed consistently on CI-hosted runners).
   }, 20_000);
+});
+
+describe('failed and cancelled fresh turns', () => {
+  it('archives an empty failed result as an error and sends a generic notice without nudging', async () => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text: null, isError: true });
+    const exchanges: ProviderExchange[] = [];
+    await processQuery(
+      query,
+      ERR_ROUTING,
+      ['m1'],
+      'codex',
+      (e) => exchanges.push(e),
+      'prompt',
+      undefined,
+      false,
+      false,
+    );
+    expect(exchanges.map((e) => e.status)).toEqual(['error']);
+    expect(JSON.parse(getUndeliveredMessages()[0].content).text).toBe(
+      'The agent run failed. Check the logs for details.',
+    );
+    expect(pushes).toEqual([]);
+  });
+
+  it('rejects a fresh stream that closes without a result', async () => {
+    const { query } = makeResultQuery({ type: 'init', continuation: 'thread' });
+    const exchanges: ProviderExchange[] = [];
+    await expect(
+      processQuery(query, ERR_ROUTING, ['m1'], 'codex', (e) => exchanges.push(e), 'prompt', undefined, false, false),
+    ).rejects.toThrow('before the turn completed');
+    expect(exchanges.map((e) => e.status)).toEqual(['error']);
+  });
+
+  it('keeps the single fresh recovery retry and hides thrown diagnostics', async () => {
+    insertMessage('m1', 'chat', { text: 'review' });
+    const provider = new MockProvider();
+    let attempts = 0;
+    provider.query = () => {
+      attempts++;
+      return {
+        push() {},
+        end() {},
+        abort() {},
+        events: (async function* (): AsyncGenerator<ProviderEvent> {
+          throw new Error('private secret diagnostics');
+        })(),
+      };
+    };
+    await runPollLoop({ provider, providerName: 'codex', cwd: '/tmp', continuationMode: 'fresh' });
+    expect(attempts).toBe(2);
+    const notices = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    expect(notices).toHaveLength(1);
+    expect(JSON.parse(notices[0].content).text).toBe('The agent run failed. Check the logs for details.');
+  });
+
+  it('does not retry or acknowledge a cancelled fresh batch as completed', async () => {
+    insertMessage('m1', 'chat', { text: 'review' });
+    const signal = new AbortController();
+    const provider = new MockProvider();
+    let attempts = 0;
+    provider.query = () => {
+      attempts++;
+      return {
+        push() {},
+        end() {},
+        abort() {},
+        events: (async function* (): AsyncGenerator<ProviderEvent> {
+          signal.abort();
+          return;
+        })(),
+      };
+    };
+    await runPollLoop({
+      provider,
+      providerName: 'codex',
+      cwd: '/tmp',
+      continuationMode: 'fresh',
+      signal: signal.signal,
+    });
+    expect(attempts).toBe(1);
+    expect(getPendingMessages().map((m) => m.id)).toEqual(['m1']);
+    expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toEqual([]);
+  });
 });

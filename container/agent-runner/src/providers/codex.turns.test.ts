@@ -121,6 +121,23 @@ describe('CodexProvider active turns', () => {
     expect(fake.killed).toBe(true);
   });
 
+  for (const status of ['failed', 'interrupted']) {
+    it(`rejects a ${status} turn without treating its partial output as success`, async () => {
+      const fake = createFakeCodexRuntime();
+      const provider = createCodexProvider({}, fake.runtime);
+      const query = provider.query({ prompt: 'prompt', cwd: '/workspace/agent' });
+      const events: ProviderEvent[] = [];
+      const collect = collectEvents(query.events, events);
+      const failure = collect.catch((err: Error) => err);
+      await waitFor(() => fake.startCalls.length === 1);
+      fake.completeTurn('private diagnostics', status);
+      expect(await failure).toBeInstanceOf(Error);
+      expect(((await failure) as Error).message).toBe(`Codex turn ${status}`);
+      expect(events.some((event) => event.type === 'result')).toBe(false);
+      expect(fake.killed).toBe(true);
+    });
+  }
+
   it('threads the configured model and effort into the turn', async () => {
     const fake = createFakeCodexRuntime();
     const provider = createCodexProvider({ model: 'gpt-5.5', effort: 'high' }, fake.runtime);
@@ -224,8 +241,8 @@ function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
     get killed() {
       return killed;
     },
-    completeTurn(text: string) {
-      notify('turn/completed', { turn: { items: [{ type: 'agentMessage', text }] } });
+    completeTurn(text: string, status = 'completed') {
+      notify('turn/completed', { turn: { status, items: [{ type: 'agentMessage', text }] } });
     },
     startTool(type: string) {
       notify('item/started', { item: { type } });

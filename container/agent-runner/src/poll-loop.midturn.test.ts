@@ -272,11 +272,11 @@ describe('mid-turn <message> block delivery', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(2);
     expect(JSON.parse(out[0].content).text).toBe('Started on it.');
-    expect(JSON.parse(out[1].content).text).toBe(errText);
+    expect(JSON.parse(out[1].content).text).toBe('The agent run failed. Check the logs for details.');
     expect(pushes).toHaveLength(0);
   });
 
-  it('an error result that only repeats the streamed block is not delivered again', async () => {
+  it('an error result that only repeats the streamed block preserves the partial reply and adds a failure notice', async () => {
     seedDest();
     const block = '<message to="discord-main">Partial progress report.</message>';
     async function* events(): AsyncGenerator<ProviderEvent> {
@@ -288,7 +288,7 @@ describe('mid-turn <message> block delivery', () => {
 
     await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
 
-    expect(getUndeliveredMessages()).toHaveLength(1);
+    expect(getUndeliveredMessages().map((m) => JSON.parse(m.content).text)).toEqual(['Partial progress report.', 'The agent run failed. Check the logs for details.']);
     expect(pushes).toHaveLength(0);
   });
 

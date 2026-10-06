@@ -544,7 +544,7 @@ describe('poll loop — provider error recovery', () => {
     expect(provider.queries).toBe(2);
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('Error: persistent failure');
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
     expect(getPendingMessages()).toHaveLength(0);
   });
 
@@ -560,8 +560,8 @@ describe('poll loop — provider error recovery', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
-    expect(JSON.parse(out[0].content).text).toContain('API rate limit exceeded');
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(JSON.parse(out[0].content).text).not.toContain('API rate limit exceeded');
 
     // Input message should be marked completed despite the error
     const pending = getPendingMessages();
@@ -589,7 +589,7 @@ describe('poll loop — stale session recovery', () => {
     // Error was written to outbound
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
 
     // Continuation was cleared (isSessionInvalid returned true)
     expect(getContinuation('mock')).toBeUndefined();

@@ -128,7 +128,7 @@ describe('harness tag artifacts stripped from deliveries (wiring)', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('Spending limit reached.');
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
     expect(pushes).toHaveLength(0);
   });

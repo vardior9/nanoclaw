@@ -206,23 +206,19 @@ describe('multi-segment turns: result overlap never re-delivers', () => {
 // ── Error and interrupted turns ──
 
 describe('error and interrupted turns', () => {
-  it('error result whose block never streamed (errors[] shape), nothing sent mid-turn: no write, nudge fires', async () => {
+  it('error result whose block never streamed (errors[] shape), nothing sent mid-turn: generic failure notice, no nudge', async () => {
     seedDest();
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };
       yield { type: 'text', text: 'partial progress narration, unwrapped' };
-      // The claude provider builds error-result text from the SDK's errors[]
-      // field — content that NEVER streamed. The result door still does not
-      // send it as a block; with nothing delivered this turn the nudge asks
-      // for a proper re-send instead.
       yield { type: 'result', text: '<message to="discord-main">Run aborted: quota.</message>', isError: true };
     }
     const { query, pushes } = makeStubQuery(events());
 
     await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
 
-    expect(deliveredTexts()).toEqual([]);
-    expect(nudges(pushes)).toHaveLength(1);
+    expect(deliveredTexts()).toEqual(['The agent run failed. Check the logs for details.']);
+    expect(nudges(pushes)).toHaveLength(0);
   });
 
   it('a bare (blockless) error result still surfaces via deliverErrorResult — the errors exception', async () => {
@@ -236,7 +232,7 @@ describe('error and interrupted turns', () => {
 
     await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
 
-    expect(deliveredTexts()).toEqual([errText]);
+    expect(deliveredTexts()).toEqual(['The agent run failed. Check the logs for details.']);
     expect(pushes).toHaveLength(0);
   });
 

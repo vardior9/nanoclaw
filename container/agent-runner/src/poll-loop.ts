@@ -285,6 +285,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const abortActiveQuery = () => query.abort();
     if (config.signal?.aborted) abortActiveQuery();
     else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
+    let batchFailed = false;
     try {
       const result = await processQuery(
         query,
@@ -296,7 +297,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation,
         config.provider.emitsMidTurnText === true,
         config.continuationMode !== 'fresh',
+        config.signal,
       );
+      batchFailed = result.failed;
       if (result.continuation && result.continuation !== continuation) {
         if (config.continuationMode === 'fresh') {
           continuation = undefined;
@@ -308,6 +311,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
+      batchFailed = true;
       log(`Query error: ${errMsg}`);
 
       // Stale/corrupt continuation recovery: ask the provider whether
@@ -319,6 +323,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
+      if (config.signal?.aborted) {
+        releaseProcessing(processingIds);
+        log('Query cancelled — leaving the batch pending');
+        return;
+      }
+
       if (config.continuationMode === 'fresh' && !freshBatchRetryUsed) {
         freshBatchRetryUsed = true;
         releaseProcessing(processingIds);
@@ -326,15 +336,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continue;
       }
 
-      // Write error response so the user knows something went wrong
-      writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
+      if (!routing.taskRun && routing.channelType !== 'agent') deliverErrorResult(routing);
 
       // The batch is still acked completed below (no redelivery). Without
       // this line the only log trace of the errored turn is "Query error"
@@ -345,12 +347,18 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       config.signal?.removeEventListener('abort', abortActiveQuery);
     }
 
+    if (config.signal?.aborted) {
+      releaseProcessing(processingIds);
+      log('Query cancelled — leaving the batch pending');
+      return;
+    }
+
     // Ensure completed even if processQuery ended without a result event
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
-    log(`Completed ${ids.length} message(s)`);
+    log(`${batchFailed ? 'Failed' : 'Completed'} ${ids.length} message(s)`);
     if (config.continuationMode === 'fresh') {
-      log('Fresh turn complete — exiting disposable container');
+      log(`Fresh turn ${batchFailed ? 'failed' : 'complete'} — exiting disposable container`);
       return;
     }
   }
@@ -391,6 +399,7 @@ function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommand
 }
 
 interface QueryResult {
+  failed: boolean;
   continuation?: string;
 }
 
@@ -414,8 +423,10 @@ export async function processQuery(
   emitsMidTurnText = false,
   /** Keep the provider stream open for later messages and persist its continuation. */
   keepAlive = true,
+  signal?: AbortSignal,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
+  let failed = false;
   let done = false;
   let unwrappedNudged = false;
   // Once-per-turn guard for the task-run "<message> block was not delivered"
@@ -588,6 +599,7 @@ export async function processQuery(
 
   try {
     for await (const event of query.events) {
+      if (signal?.aborted) break;
       handleEvent(event, routing);
       touchHeartbeat();
 
@@ -622,8 +634,19 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
-        if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks, resultBlocks } = dispatchResultText(event.text, routing, {
+        if (event.isError === true) {
+          failed = true;
+          if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(event.text ?? 'The agent run failed.');
+          if (!routing.taskRun && routing.channelType !== 'agent') deliverErrorResult(routing);
+          notifyExchangeComplete(onExchangeComplete, {
+            prompt: archivePrompts[0] ?? initialPrompt,
+            result: event.text,
+            continuation: queryContinuation ?? initialContinuation,
+            status: 'error',
+          });
+          archivePrompts.shift();
+        } else if (event.text) {
+          const { hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing, {
             midTurnSent,
             // For emitsMidTurnText providers the result door NEVER delivers
             // content (error results excepted, below): mid-turn streaming is
@@ -645,58 +668,43 @@ export async function processQuery(
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
           if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(event.text);
-          if (resultBlocks === 0 && event.isError === true && !routing.taskRun) {
-            // Non-retryable error turn (e.g. a 403 billing_error) with no
-            // <message> envelope: deliver the notice instead of dropping it as
-            // scratchpad, and skip the re-wrap nudge — it would just re-hammer
-            // the failing gateway turn after turn.
-            deliverErrorResult(event.text, routing);
-            notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
-              result: event.text,
-              continuation: queryContinuation ?? initialContinuation,
-              status: 'error',
-            });
-            archivePrompts.shift();
-          } else {
-            // An unwrapped final text only warrants the wrap-nudge when NOTHING
-            // was delivered this turn — hasUnwrapped already folds in the
-            // turn's mid-turn sent count. If a reply already went out as a
-            // mid-turn block, the unwrapped tail is a self-summary; nudging
-            // coaxes a redundant second message (live-observed). It stays in
-            // the scratchpad log.
-            const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
-            notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
-              result: event.text,
-              continuation: queryContinuation ?? initialContinuation,
-              status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
-            });
-            if (willRetryWrapping) {
-              retryScheduled = true;
-              unwrappedNudged = true;
-              const destinations = getAllDestinations();
-              const names = destinations.map((d) => d.name).join(', ');
-              query.push(
-                `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
-                  `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
-                  `Your destinations: ${names}. ` +
-                  `Please re-send your response with the correct wrapping.</system>`,
-              );
-            }
-            if (willRetryTaskBlocks) {
-              retryScheduled = true;
-              taskBlockNudged = true;
-              const names = getAllDestinations()
-                .map((d) => d.name)
-                .join(', ');
-              query.push(buildTaskBlockNudge(taskBlocks, names));
-            }
-            // A retry result (wrapping or task-block nudge) answers the SAME
-            // user prompt — keep it queued so the retry archives against it,
-            // not the nudge text.
-            if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
+          // An unwrapped final text only warrants the wrap-nudge when NOTHING
+          // was delivered this turn — hasUnwrapped already folds in the
+          // turn's mid-turn sent count. If a reply already went out as a
+          // mid-turn block, the unwrapped tail is a self-summary; nudging
+          // coaxes a redundant second message (live-observed). It stays in
+          // the scratchpad log.
+          const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+          notifyExchangeComplete(onExchangeComplete, {
+            prompt: archivePrompts[0] ?? initialPrompt,
+            result: event.text,
+            continuation: queryContinuation ?? initialContinuation,
+            status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
+          });
+          if (willRetryWrapping) {
+            retryScheduled = true;
+            unwrappedNudged = true;
+            const destinations = getAllDestinations();
+            const names = destinations.map((d) => d.name).join(', ');
+            query.push(
+              `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
+                `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
+                `Your destinations: ${names}. ` +
+                `Please re-send your response with the correct wrapping.</system>`,
+            );
           }
+          if (willRetryTaskBlocks) {
+            retryScheduled = true;
+            taskBlockNudged = true;
+            const names = getAllDestinations()
+              .map((d) => d.name)
+              .join(', ');
+            query.push(buildTaskBlockNudge(taskBlocks, names));
+          }
+          // A retry result (wrapping or task-block nudge) answers the SAME
+          // user prompt — keep it queued so the retry archives against it,
+          // not the nudge text.
+          if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
         } else archivePrompts.shift();
         // Turn boundary: reset the per-turn sent count after the result's
         // nudge decision has used it. A nudge retry re-counts via its own
@@ -713,6 +721,17 @@ export async function processQuery(
         if (!keepAlive && !retryScheduled) query.end();
       }
     }
+    if (!keepAlive && archivePrompts.length > 0 && !endedForCommand && !signal?.aborted) {
+      throw new Error('Provider stream ended before the turn completed');
+    }
+    if (signal?.aborted && archivePrompts.length > 0) {
+      notifyExchangeComplete(onExchangeComplete, {
+        prompt: archivePrompts[0] ?? initialPrompt,
+        result: 'The agent run was cancelled.',
+        continuation: queryContinuation ?? initialContinuation,
+        status: 'error',
+      });
+    }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     notifyExchangeComplete(onExchangeComplete, {
@@ -727,7 +746,7 @@ export async function processQuery(
     clearInterval(pollHandle);
   }
 
-  return { continuation: queryContinuation };
+  return { continuation: queryContinuation, failed };
 }
 
 function notifyExchangeComplete(
@@ -761,15 +780,8 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
   }
 }
 
-/**
- * Deliver a turn's text straight to the channel the batch arrived on. Used when
- * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) with
- * no <message> envelope: the notice would otherwise be dropped as scratchpad.
- * This is the same user-facing write the outer catch block does, minus the
- * `Error:` prefix — the provider's text is already a user-facing message.
- */
-function deliverErrorResult(text: string, routing: RoutingContext): void {
-  log('Error result with no <message> envelope — delivering to channel');
+function deliverErrorResult(routing: RoutingContext): void {
+  log('Error result notice — delivering to channel');
   writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
@@ -777,7 +789,7 @@ function deliverErrorResult(text: string, routing: RoutingContext): void {
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text: stripHarnessTagArtifacts(text) }),
+    content: JSON.stringify({ text: 'The agent run failed. Check the logs for details.' }),
   });
 }
 
