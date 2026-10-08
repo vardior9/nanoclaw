@@ -27,6 +27,7 @@ import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-con
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import { withWritableSessionStubs } from './credential-stubs.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
@@ -156,6 +157,7 @@ async function spawnContainer(session: Session): Promise<void> {
   const args = await buildContainerArgs(
     mounts,
     containerName,
+    path.join(sessionDir(agentGroup.id, session.id), '.credential-stubs'),
     agentGroup,
     containerConfig,
     provider,
@@ -468,6 +470,7 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  sessionStubDir: string,
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
   _provider: string,
@@ -539,10 +542,15 @@ async function buildContainerArgs(
   if (agentIdentifier) {
     await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
   }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+  const gatewayArgs: string[] = [];
+  const onecliApplied = await onecli.applyContainerConfig(gatewayArgs, {
+    addHostMapping: false,
+    agent: agentIdentifier,
+  });
   if (!onecliApplied) {
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
+  args.push(...withWritableSessionStubs(gatewayArgs, sessionStubDir));
   log.info('OneCLI gateway applied', { containerName });
 
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
