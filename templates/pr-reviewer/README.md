@@ -17,5 +17,4 @@ Then: wire `#or-pr-reviewer` per-thread (see docs/pr-reviewer.md), run `scripts/
 
 ## Deliberate deviations from upstream
 
-- `container/cli-tools.json` pins `@openai/codex` **0.146.0** (skill's canonical pin is older): ≥0.144 is required for `gpt-5.6-sol`, and 0.146.0 fixes `codex app-server` hanging forever on a rejected ChatGPT websocket (wss 405). Re-running `/add-codex` or `/update-skills` resets this pin — restore it after.
 - `container/agent-runner/src/providers/codex.ts` drops the payload's generated-image `file` events (trunk v2.2.0 has no `file` event type; the block didn't typecheck and nothing could consume it). Revisit when trunk grows file events.
