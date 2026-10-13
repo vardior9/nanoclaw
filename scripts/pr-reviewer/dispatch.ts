@@ -21,6 +21,7 @@ import {
   type PrDetail,
   type PrRef,
   type PrState,
+  type Reviewer,
   type StateFile,
   LAST_TICK_PATH,
   REPOS_ROOT,
@@ -37,7 +38,9 @@ import {
   getUnresolvedSelfReviewThreads,
   injectCliEvent,
   isPendingVerdictMessage,
+  isReviewRequested,
   latestReviewRequest,
+  reviewerTeams,
   reviewerWakeReason,
   latestSelfReviewState,
   loadConfig,
@@ -84,6 +87,7 @@ interface TickCtx {
   bootstrapCount: number;
   failedRepoClones: Set<string>;
   availableWakeSlots: number;
+  reviewer: Reviewer;
 }
 
 function repoLogKey(owner: string, repo: string): string {
@@ -158,7 +162,7 @@ async function bootstrapNewPr(key: string, ref: PrRef, pr: PrDetail, ctx: TickCt
   const { owner, repo } = ref;
   const pendingThread = pendingSlackReviewThreadId(ctx.cfg, key);
   const wakeId = reviewerWakeId('new_pr', key, pr.head.sha);
-  const reviewRequest = latestReviewRequest(owner, repo, pr.number, ctx.cfg.selfLogin);
+  const reviewRequest = latestReviewRequest(owner, repo, pr.number, ctx.reviewer);
 
   if (ctx.availableWakeSlots <= 0) {
     console.log(`[pr-reviewer] ${key}: deferring wake (review capacity full)`);
@@ -361,7 +365,7 @@ async function processPr(key: string, isDiscovered: boolean, ctx: TickCtx): Prom
     return; // keep state as-is, retry next tick
   }
   const pr = detail.data;
-  const stillRequested = (pr.requested_reviewers ?? []).some((u) => u.login === ctx.cfg.selfLogin);
+  const stillRequested = isReviewRequested(ref.owner, pr, ctx.reviewer);
   const isClosed = pr.state === 'closed';
 
   if (!known) {
@@ -403,7 +407,7 @@ async function processPr(key: string, isDiscovered: boolean, ctx: TickCtx): Prom
 
   let reviewRequestId = known.last_review_request_id;
   if (stillRequested) {
-    const reviewRequest = latestReviewRequest(ref.owner, ref.repo, ref.number, ctx.cfg.selfLogin);
+    const reviewRequest = latestReviewRequest(ref.owner, ref.repo, ref.number, ctx.reviewer);
     if (!reviewRequest.ok) {
       console.error(`[pr-reviewer] ${key}: failed to fetch review-request events: ${reviewRequest.error}`);
       return;
@@ -526,6 +530,14 @@ async function tick(cfg: Config, args: Args): Promise<void> {
     }
   }
 
+  let teams: Set<string>;
+  try {
+    teams = reviewerTeams();
+  } catch (err) {
+    console.error('[pr-reviewer] could not list reviewer teams, matching direct requests only this tick', err);
+    teams = new Set();
+  }
+
   const discoveredKeys = new Set(discovered.map(prKey));
   const keys = args.once
     ? [prKey(discovered[0])]
@@ -538,6 +550,7 @@ async function tick(cfg: Config, args: Args): Promise<void> {
     bootstrapCount: 0,
     failedRepoClones: new Set(),
     availableWakeSlots: Math.max(0, cfg.maxOutstandingReviews - outstandingReviews),
+    reviewer: { login: cfg.selfLogin, teams },
   };
 
   for (const key of keys) {

@@ -281,6 +281,12 @@ export interface PrDetail {
   head: { sha: string };
   base: { ref: string };
   requested_reviewers?: Array<{ login: string }>;
+  requested_teams?: Array<{ slug: string }>;
+}
+
+export interface Reviewer {
+  login: string;
+  teams: Set<string>;
 }
 
 function runGh(args: string[]): { ok: true; stdout: string } | { ok: false; error: string } {
@@ -354,24 +360,49 @@ export function latestSelfReviewState(
   }
 }
 
+export function reviewerTeams(): Set<string> {
+  const res = runGh(['api', '--paginate', 'user/teams', '--jq', '.[] | "\\(.organization.login)/\\(.slug)"']);
+  if (!res.ok) throw new Error(`gh user/teams failed: ${res.error}`);
+  return new Set(res.stdout.split('\n').filter(Boolean).map((team) => team.toLowerCase()));
+}
+
+function isReviewerLogin(reviewer: Reviewer, login: string): boolean {
+  return login.toLowerCase() === reviewer.login.toLowerCase();
+}
+
+function isReviewerTeam(reviewer: Reviewer, owner: string, teamSlug: string): boolean {
+  return reviewer.teams.has(`${owner}/${teamSlug}`.toLowerCase());
+}
+
+export function isReviewRequested(owner: string, pr: PrDetail, reviewer: Reviewer): boolean {
+  return (
+    (pr.requested_reviewers ?? []).some((user) => isReviewerLogin(reviewer, user.login)) ||
+    (pr.requested_teams ?? []).some((team) => isReviewerTeam(reviewer, owner, team.slug))
+  );
+}
+
 export function latestReviewRequest(
   owner: string,
   repo: string,
   number: number,
-  selfLogin: string,
+  reviewer: Reviewer,
 ): { ok: true; id: string | null } | { ok: false; error: string } {
   const res = runGh([
     'api',
     '--paginate',
     `repos/${owner}/${repo}/issues/${number}/events?per_page=100`,
     '--jq',
-    '.[] | select(.event=="review_requested") | [.id,.created_at,.requested_reviewer.login] | @tsv',
+    '.[] | select(.event=="review_requested") | [.id,.created_at,.requested_reviewer.login // "",.requested_team.slug // ""] | @tsv',
   ]);
   if (!res.ok) return { ok: false, error: res.error };
   const last = res.stdout
     .trim()
     .split('\n')
-    .filter((line) => line.split('\t')[2]?.toLowerCase() === selfLogin.toLowerCase())
+    .filter((line) => {
+      const [, , login, teamSlug] = line.split('\t');
+      if (login) return isReviewerLogin(reviewer, login);
+      return Boolean(teamSlug) && isReviewerTeam(reviewer, owner, teamSlug);
+    })
     .at(-1);
   return { ok: true, id: last?.split('\t', 1)[0] ?? null };
 }
