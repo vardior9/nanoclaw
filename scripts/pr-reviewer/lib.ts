@@ -75,12 +75,23 @@ export function loadConfig(): Config {
   if (!slackBotToken) {
     throw new Error('SLACK_BOT_TOKEN is not set in .env — cannot post to Slack');
   }
+  const required = ['PR_SELF_LOGIN', 'PR_REVIEWS_DM', 'PR_OWNER_SLACK_ID'];
+  const missing = required.filter((key) => !env[key]?.trim());
+  if (missing.length) {
+    throw new Error(`Missing reviewer configuration: ${missing.join(', ')}. See docs/pr-reviewer.md.`);
+  }
+  const selfLogin = env.PR_SELF_LOGIN.trim();
+  const reviewsDm = env.PR_REVIEWS_DM.trim();
+  const ownerSlackId = env.PR_OWNER_SLACK_ID.trim();
+  if (!/^D[A-Z0-9]+$/.test(reviewsDm) || !/^U[A-Z0-9]+$/.test(ownerSlackId)) {
+    throw new Error('PR_REVIEWS_DM must be a Slack DM ID and PR_OWNER_SLACK_ID a Slack user ID.');
+  }
   return {
-    prSearchQuery: env.PR_SEARCH_QUERY || 'is:pr review-requested:vardior9 org:apiiro state:open',
-    reviewsChannel: env.PR_REVIEWS_CHANNEL || 'C0BR29QUFEG',
-    reviewsDm: env.PR_REVIEWS_DM || 'D0B5RV4BH37',
-    ownerSlackId: env.PR_OWNER_SLACK_ID || 'U010NV4PV29',
-    selfLogin: env.PR_SELF_LOGIN || 'vardior9',
+    prSearchQuery: env.PR_SEARCH_QUERY || `is:pr review-requested:${selfLogin} org:apiiro state:open`,
+    reviewsChannel: env.PR_REVIEWS_CHANNEL || reviewsDm,
+    reviewsDm,
+    ownerSlackId,
+    selfLogin,
     remindAfterHours: intOr(env.REMIND_AFTER_HOURS, 24),
     maxNudges: intOr(env.MAX_NUDGES, 1),
     bootstrapPerTick: intOr(env.PR_BOOTSTRAP_PER_TICK, 2),
@@ -163,13 +174,6 @@ export interface PrState {
   head_sha: string;
   /** Latest observed head; `head_sha` remains the head used for the last review wake. */
   last_observed_head_sha?: string;
-  /**
-   * PR title as of the tick that opened tracking. The only host-side source
-   * for the Slack agent-session title, which the reviewer module reads from
-   * this file — Slack fixes that title at creation, so it identifies the PR
-   * (`lim 48766 <subject>`) rather than carrying review state. Optional:
-   * entries written before this field existed fall back to `<repo> <number>`.
-   */
   pr_title?: string;
   base_ref: string;
   opened_at: string;
@@ -267,6 +271,7 @@ interface GhSearchItem {
 
 /** Raw fields consumed from `gh api repos/{o}/{r}/pulls/{n}`. */
 export interface PrDetail {
+  body?: string | null;
   number: number;
   state: 'open' | 'closed';
   merged: boolean;

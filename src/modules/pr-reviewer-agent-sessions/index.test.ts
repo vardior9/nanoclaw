@@ -22,7 +22,7 @@ const session: Session = {
   id: 'sess-review',
   agent_group_id: 'ag-reviewer',
   messaging_group_id: 'mg-dm',
-  thread_id: pendingReviewerThreadId('DOWNER', 'apiiro/guardian#123'),
+  thread_id: pendingReviewerThreadId('DOWNER', 'acme/widgets#123'),
   agent_provider: null,
   status: 'active',
   container_status: 'stopped',
@@ -42,6 +42,7 @@ const msg = {
 };
 
 beforeEach(() => {
+  vi.stubEnv('PR_OWNER_SLACK_ID', 'UOWNER');
   const db = initTestDb();
   runMigrations(db);
   db.prepare('INSERT INTO agent_groups (id, name, folder, created_at) VALUES (?, ?, ?, ?)').run(
@@ -60,7 +61,10 @@ beforeEach(() => {
   ).run(session);
 });
 
-afterEach(() => closeDb());
+afterEach(() => {
+  closeDb();
+  vi.unstubAllEnvs();
+});
 
 function fakeAdapter() {
   let rootCalls = 0;
@@ -84,32 +88,57 @@ function fakeAdapter() {
 
 describe('reviewer agent session titles', () => {
   it('identifies the PR by repo, number and subject', () => {
-    expect(reviewerSessionTitle('apiiro/lim#48766', 'Batch the per-artifact reads')).toBe(
-      'lim 48766 Batch the per-artifact reads',
+    expect(reviewerSessionTitle('acme/widgets#123', 'Batch the per-artifact reads')).toBe(
+      'widgets 123 Batch the per-artifact reads',
     );
   });
 
   it('falls back to repo and number when the PR title is unknown', () => {
-    expect(reviewerSessionTitle('apiiro/lim#48766', null)).toBe('lim 48766');
+    expect(reviewerSessionTitle('acme/widgets#123', null)).toBe('widgets 123');
   });
 
   it('reduces the title to characters Slack keeps verbatim', () => {
-    // Slack stored `apiiro/lim#48766` as `apiiro_lim_48766`; anything it would
-    // rewrite must be gone before we hand the title over.
-    expect(reviewerSessionTitle('apiiro/lim#48766', '[LIM-1234] fix `parse()` — a/b (#9)')).toBe(
-      'lim 48766 LIM-1234 fix parse a b 9',
+    expect(reviewerSessionTitle('acme/widgets#123', '[LIM-1234] fix `parse()` — a/b (#9)')).toBe(
+      'widgets 123 LIM-1234 fix parse a b 9',
     );
   });
 
   it('caps the title so Slack never truncates it for us', () => {
-    const title = reviewerSessionTitle('apiiro/lim#48766', 'x'.repeat(400));
+    const title = reviewerSessionTitle('acme/widgets#123', 'x'.repeat(400));
     expect(title.length).toBe(120);
   });
 });
 
 describe('reviewer action-only agent sessions', () => {
+  it('rejects a verdict click from anyone other than the configured owner', async () => {
+    const { adapter } = fakeAdapter();
+    await deliverPendingReviewerAgentSession(
+      {
+        ...msg,
+        content: JSON.stringify({
+          text: 'PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"0123456789abcdef0123456789abcdef01234567"}\nReady',
+        }),
+      },
+      session,
+      adapter,
+    );
+    const row = getDb().prepare('SELECT question_id FROM reviewer_verdict_requests').get() as { question_id: string };
+    await handleReviewerVerdict({
+      questionId: row.question_id,
+      value: 'HOLD',
+      userId: 'UOTHER',
+      channelType: 'slack',
+      platformId: '',
+      threadId: null,
+    });
+    expect(getDb().prepare('SELECT terminal_reason FROM reviewer_verdict_requests').get()).toEqual({
+      terminal_reason: null,
+    });
+    expect(adapter.deliver).toHaveBeenCalledTimes(2);
+  });
+
   it('round-trips the PR key in a synthetic thread id', () => {
-    expect(prKeyFromPendingThread(session.thread_id)).toBe('apiiro/guardian#123');
+    expect(prKeyFromPendingThread(session.thread_id)).toBe('acme/widgets#123');
   });
 
   it('materializes exactly one root and resolves the real thread as an alias', async () => {
@@ -124,7 +153,7 @@ describe('reviewer action-only agent sessions', () => {
       'slack:DOWNER:1788000000.123456',
       'suspended',
       'slack',
-      expect.objectContaining({ title: 'guardian 123' }),
+      expect.objectContaining({ title: 'widgets 123', initiatorUserId: 'UOWNER' }),
     );
     expect(findReviewerSessionByAlias('ag-reviewer', 'mg-dm', 'slack:DOWNER:1788000000.123456')?.id).toBe(session.id);
   });
@@ -151,7 +180,7 @@ describe('reviewer action-only agent sessions', () => {
       content: JSON.stringify({
         text:
           'PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"0123456789abcdef0123456789abcdef01234567"}\n' +
-          '<@U010NV4PV29> Ready for final verdict\nhttps://github.com/apiiro/guardian/pull/123',
+          '<@UOWNER> Ready for final verdict\nhttps://github.com/acme/widgets/pull/123',
       }),
     };
 
@@ -162,11 +191,11 @@ describe('reviewer action-only agent sessions', () => {
     expect(JSON.parse(String(delivery[4]))).toMatchObject({
       type: 'ask_question',
       title: 'Final PR verdict',
-      question: 'Ready for final verdict\nhttps://github.com/apiiro/guardian/pull/123',
+      question: 'Ready for final verdict\nhttps://github.com/acme/widgets/pull/123',
       options: expect.arrayContaining([expect.objectContaining({ value: 'APPROVE' })]),
     });
     expect(getDb().prepare('SELECT pr_key, head_sha, recommendation FROM reviewer_verdict_requests').get()).toEqual({
-      pr_key: 'apiiro/guardian#123',
+      pr_key: 'acme/widgets#123',
       head_sha: '0123456789abcdef0123456789abcdef01234567',
       recommendation: 'APPROVE',
     });
@@ -247,7 +276,7 @@ describe('reviewer action-only agent sessions', () => {
       handleReviewerVerdict({
         questionId: row.question_id,
         value: 'HOLD',
-        userId: 'U010NV4PV29',
+        userId: 'UOWNER',
         channelType: 'slack',
         platformId: '',
         threadId: null,
@@ -292,7 +321,7 @@ describe('reviewer action-only agent sessions', () => {
         handleReviewerVerdict({
           questionId: row.question_id,
           value: 'APPROVE',
-          userId: 'U010NV4PV29',
+          userId: 'UOWNER',
           channelType: 'slack',
           platformId: '',
           threadId: null,
@@ -342,7 +371,7 @@ describe('reviewer action-only agent sessions', () => {
         handleReviewerVerdict({
           questionId: row.question_id,
           value: 'APPROVE',
-          userId: 'U010NV4PV29',
+          userId: 'UOWNER',
           channelType: 'slack',
           platformId: '',
           threadId: null,
@@ -394,7 +423,7 @@ describe('reviewer action-only agent sessions', () => {
       handleReviewerVerdict({
         questionId: row.question_id,
         value: 'APPROVE',
-        userId: 'U010NV4PV29',
+        userId: 'UOWNER',
         channelType: 'slack',
         platformId: '',
         threadId: null,

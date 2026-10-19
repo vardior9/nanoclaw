@@ -16,6 +16,8 @@
 import fs from 'fs';
 import path from 'path';
 
+import { formatKickoffMessage, formatReReviewMessage } from './prompts.js';
+
 import {
   type Config,
   type PrDetail,
@@ -26,8 +28,6 @@ import {
   LAST_TICK_PATH,
   REPOS_ROOT,
   acquireLock,
-  containerBarePath,
-  containerWorktreePath,
   countOutstandingReviewMessages,
   ensureBareClone,
   fetchPrRefs,
@@ -65,11 +65,6 @@ interface Args {
   once: string | null;
 }
 
-const SLACK_NOTIFICATION_GATE =
-  'Slack is silent by default. Do the review and GitHub writes without a Slack reply. ' +
-  'Send Slack only if Vardi personally must decide or act before you can proceed or the PR is ready for its single final-verdict request. ' +
-  'Findings and finding changes are GitHub-only.';
-
 function parseArgs(argv: string[]): Args {
   let dryRun = false;
   let once: string | null = null;
@@ -100,48 +95,6 @@ function reviewerWakeId(kind: 'new_pr' | 'review_request' | 'push', key: string,
 
 function recordWakeDecision(wakeId: string, decision: 'wake' | 'suppress', reason: string): void {
   console.log(`[pr-reviewer-metric] ${JSON.stringify({ wake_id: wakeId, decision, reason })}`);
-}
-
-function formatKickoffMessage(owner: string, repo: string, pr: PrDetail, wakeId: string): string {
-  return [
-    `Reviewer wake id: ${wakeId}`,
-    `New PR ready for review: ${pr.html_url}`,
-    `owner/repo: ${owner}/${repo}`,
-    `PR number: ${pr.number}`,
-    `title: ${pr.title}`,
-    `author: ${pr.user.login}`,
-    `head sha: ${pr.head.sha}`,
-    `base ref: ${pr.base.ref}`,
-    `bare clone (host clone of the repo, no PR checked out): ${containerBarePath(owner, repo)}`,
-    `expected worktree path for this PR (create it if missing): ${containerWorktreePath(owner, repo, pr.number)}`,
-    '',
-    'This is a fresh session with no other context. Follow your pr-review skill to check out ' +
-      'the PR (creating the worktree above from the bare clone if it does not exist yet) and review it.',
-    SLACK_NOTIFICATION_GATE,
-  ].join('\n');
-}
-
-function formatReReviewMessage(
-  owner: string,
-  repo: string,
-  pr: PrDetail,
-  deltaContext: string,
-  unresolvedContext: string,
-  wakeId: string,
-): string {
-  return [
-    `Reviewer wake id: ${wakeId}`,
-    `Review re-requested on ${owner}/${repo}#${pr.number} — head is now ${pr.head.sha}.`,
-    `Re-fetch into the existing worktree at ${containerWorktreePath(owner, repo, pr.number)} (bare clone: ${containerBarePath(owner, repo)}) and re-review.`,
-    '',
-    'This is a fresh model thread. The host-calculated continuation context below is authoritative; do not search old model transcripts.',
-    '',
-    deltaContext,
-    '',
-    'Unresolved review threads opened by this reviewer:',
-    unresolvedContext,
-    SLACK_NOTIFICATION_GATE,
-  ].join('\n');
 }
 
 /**

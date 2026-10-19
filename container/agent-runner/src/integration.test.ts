@@ -110,8 +110,8 @@ describe('poll loop integration', () => {
 
     insertMessage(
       'review-request',
-      { text: 'Review https://github.com/apiiro/lim/pull/49510' },
-      { platformId: 'chan-1', channelType: 'discord', threadId: 'pending-pr-49510', seq: 2 },
+      { text: 'Review https://github.com/acme/widgets/pull/123' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'pending-pr-123', seq: 2 },
     );
     let call = 0;
     const provider = new RecordingProvider({}, () =>
@@ -135,7 +135,7 @@ describe('poll loop integration', () => {
 
     expect(provider.prompts[1]).toContain('Scope decision needed: choose full, high-value, or skip.');
     expect(provider.prompts[1]).toContain('full');
-    expect(provider.prompts[1]).not.toContain('Review https://github.com/apiiro/lim/pull/49510');
+    expect(provider.prompts[1]).not.toContain('Review https://github.com/acme/widgets/pull/123');
   });
 
   it('should pick up a message, process it, and write a response', async () => {

@@ -7,6 +7,8 @@ This prevents status, diff, and history reads from refreshing the shared
 worktree index. When a command returns a running-command handle, wait on that
 same command rather than starting it again.
 
+Repository review methods take precedence over the generic investigation defaults below, including full-file reads, partner-site tracing, rule selection and refutation. Complete `repository-method.md` first. A repository's criteria decide whether dependency, documentation, generated or test changes require deeper investigation.
+
 ## Reading the diff
 
 ```bash
@@ -37,10 +39,8 @@ Default is diff-only. Go wider **only when a trigger fires** — each names what
 
 Stay diff-only for: docs/comment-only diffs; dependency bumps and lockfiles; bot-authored PRs; self-contained new files with no cross-references; test-only diffs; re-review deltas that directly answer your own comments.
 
-## Budget — hard caps per PR
+## Completing the investigation
 
-- ≤ 15 `grep`/`rg`/`find` invocations
-- ≤ 20 file reads — read line ranges, never whole files over 400 lines
-- History (`git log/blame`) only to settle a specific question, ≤ 3 invocations
+Repository-method discovery, required prompt reads and applicable-rule selection are prerequisites, not optional expansion. Do not impose generic file/search caps on a repository method. Work within the host's turn and tool-call limits, prioritizing the method's highest-risk checks.
 
-Budget exhausted before you're sure → **stop and state it as an open question in the review** ("couldn't verify all call sites of X"). An honestly-flagged unverified concern beats a burned context window.
+If required context or verification remains unavailable, record the specific limitation internally and do not emit a clean final-verdict signal. Ask the owner only when their input can resolve it. An unverified suspicion is not a confirmed inline finding.

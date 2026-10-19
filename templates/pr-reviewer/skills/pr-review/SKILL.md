@@ -16,17 +16,17 @@ Choose the flow from the host event:
 
 ## Initial review
 
-1. Run the `pr-worktree` skill and read repository instructions in scope.
+1. Run `pr-worktree`, verify HEAD equals the host-supplied head SHA, and complete `references/repository-method.md` before investigating.
 2. Use the supplied PR metadata. Fetch extra GitHub metadata only if necessary to decide a finding.
-3. If the PR exceeds 2,000 changed lines or 40 files, ask Vardi once to choose full, high-value-files, or skip scope.
-4. Investigate locally using `references/investigation.md`. Trace only as far as needed to prove or dismiss concrete risks.
+3. If the PR exceeds 2,000 changed lines or 40 files, ask the owner once to choose full, high-value-files, or skip scope.
+4. Apply the repository's review method and applicable rules. Use `references/investigation.md` only for gaps the repository does not specify. Maintain its claims ledger and refute candidate findings before posting.
 5. Post problems in one `COMMENT` review using `references/github-api.md`. Clean means no GitHub review.
 6. If blockers remain, stop silently. If the review converged, emit the final-verdict signal.
 
 ## Re-review
 
-1. Refresh the worktree to the supplied new head.
-2. Review only the supplied old-to-new delta. Re-check the supplied unresolved reviewer threads against changed code; do not reconstruct or reread the original full review.
+1. Refresh the worktree locally to the supplied new head, verify HEAD, and repeat `references/repository-method.md`; method and rules can change between rounds.
+2. Apply the current repository method to the supplied old-to-new delta and unresolved reviewer threads. Select rules for delta paths plus those thread paths. Reconcile each prior concern as addressed, addressed wrongly, partially addressed, or unaddressed; verify the current code rather than trusting the author's reply. Read relevant partner code as the method requires; do not reconstruct or rereview the original full PR.
 3. Post only remaining or new problems. Do not acknowledge fixes.
 4. If blockers remain, stop silently. If converged, emit one final-verdict signal for the new exact head.
 
@@ -37,7 +37,7 @@ The model recommends; the host acts. Never call GitHub with `APPROVE` or `REQUES
 Emit exactly this wrapped destination message as the only visible output, with compact evidence and the exact 40-character head SHA supplied by the host. The wrapper is required; never emit the marker as raw text:
 
 ```text
-<message to="vardi-dm">
+<message to="owner-dm">
 PR_REVIEW_VERDICT {"recommendation":"APPROVE","head_sha":"<40-char sha>"}
 🔔 Ready for final verdict
 <title>
@@ -55,6 +55,6 @@ Diff: <files> files, +<additions>/−<deletions>
 
 ## Failures and memory
 
-Surface an error only when Vardi must act; include the linked PR, backticked author, and one concrete action. Transient failures stay internal. Retry at most once.
+Surface an error only when the owner must act; include the linked PR, backticked author, and one concrete action. Transient failures stay internal. Retry at most once.
 
 If this review produced a transferable lesson, write the concise inbox note required by the persona before completing.

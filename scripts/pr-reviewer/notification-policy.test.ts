@@ -3,14 +3,51 @@ import os from 'os';
 import path from 'path';
 
 import Database from 'better-sqlite3';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { countOutstandingReviewMessages, isPendingVerdictMessage, reviewerWakeReason, type Config } from './lib.js';
+import {
+  countOutstandingReviewMessages,
+  isPendingVerdictMessage,
+  loadConfig,
+  reviewerWakeReason,
+  type Config,
+} from './lib.js';
 
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+
+describe('reviewer configuration', () => {
+  it('requires explicit identities and a DM before it can dispatch', () => {
+    vi.stubEnv('SLACK_BOT_TOKEN', 'test-token');
+    vi.stubEnv('PR_SELF_LOGIN', '');
+    vi.stubEnv('PR_REVIEWS_DM', '');
+    vi.stubEnv('PR_OWNER_SLACK_ID', '');
+    expect(() => loadConfig()).toThrow(
+      'Missing reviewer configuration: PR_SELF_LOGIN, PR_REVIEWS_DM, PR_OWNER_SLACK_ID',
+    );
+  });
+
+  it('targets the configured reviewer and DM without personal fallbacks', () => {
+    vi.stubEnv('SLACK_BOT_TOKEN', 'test-token');
+    vi.stubEnv('PR_SELF_LOGIN', 'reviewer-test');
+    vi.stubEnv('PR_REVIEWS_DM', 'DOWNER');
+    vi.stubEnv('PR_OWNER_SLACK_ID', 'UOWNER');
+    vi.stubEnv('PR_SEARCH_QUERY', '');
+    vi.stubEnv('PR_REVIEWS_CHANNEL', '');
+    expect(loadConfig()).toMatchObject({
+      selfLogin: 'reviewer-test',
+      ownerSlackId: 'UOWNER',
+      reviewsDm: 'DOWNER',
+      reviewsChannel: 'DOWNER',
+      prSearchQuery: 'is:pr review-requested:reviewer-test org:apiiro state:open',
+    });
+    vi.stubEnv('PR_REVIEWS_DM', 'CCHANNEL');
+    expect(() => loadConfig()).toThrow('PR_REVIEWS_DM must be a Slack DM ID');
+  });
 });
 
 describe('PR reviewer notification policy', () => {
@@ -76,7 +113,9 @@ describe('PR reviewer notification policy', () => {
   it('keeps findings GitHub-only and limits Slack to the three allowed cases', () => {
     const persona = fs.readFileSync('templates/pr-reviewer/ai.nanoco.nanoclaw/context/instructions.md', 'utf8');
     const skill = fs.readFileSync('templates/pr-reviewer/skills/pr-review/SKILL.md', 'utf8');
-    const dispatcher = fs.readFileSync('scripts/pr-reviewer/dispatch.ts', 'utf8');
+    const dispatcher =
+      fs.readFileSync('scripts/pr-reviewer/dispatch.ts', 'utf8') +
+      fs.readFileSync('scripts/pr-reviewer/prompts.ts', 'utf8');
 
     expect(persona).toContain('Silence is the default');
     expect(persona).toContain('Produce visible Slack output only when');

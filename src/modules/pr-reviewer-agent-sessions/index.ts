@@ -168,9 +168,6 @@ registerMigration({
  * Resolution is signalled in-thread (the host's one-line verdict receipt) and
  * by the session status below.
  *
- * Slack also rewrites unsafe characters in the stored title (`apiiro/lim#48766`
- * came back as `apiiro_lim_48766`), so the title is pre-reduced here to the
- * character set Slack keeps verbatim — what we compose is what Slack shows.
  */
 const TITLE_MAX = 120;
 
@@ -192,7 +189,6 @@ function prTitleForKey(key: string): string | null {
   }
 }
 
-/** `apiiro/lim#48766` + "Batch reads" → `lim 48766 Batch reads`. */
 export function reviewerSessionTitle(key: string, prTitle: string | null): string {
   const parsed = /^[^/]+\/([^#]+)#(\d+)$/.exec(key);
   const head = parsed ? `${titleSafe(parsed[1])} ${parsed[2]}` : titleSafe(key);
@@ -386,6 +382,8 @@ export async function deliverPendingReviewerAgentSession(
 ): Promise<{ handled: false } | { handled: true; platformMessageId?: string }> {
   const key = prKeyFromPendingThread(session.thread_id);
   if (!key) return { handled: false };
+  const ownerSlackId = (process.env.PR_OWNER_SLACK_ID ?? readEnvFile(['PR_OWNER_SLACK_ID']).PR_OWNER_SLACK_ID)?.trim();
+  if (!ownerSlackId) throw new Error('PR_OWNER_SLACK_ID is required for reviewer delivery. See docs/pr-reviewer.md.');
   if (!adapter.setAgentSessionStatus) throw new Error('Slack adapter has no native agent-session lifecycle');
 
   const mg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
@@ -495,7 +493,6 @@ export async function deliverPendingReviewerAgentSession(
       .run(platformMessageId, questionId);
   }
 
-  const ownerSlackId = readEnvFile(['PR_OWNER_SLACK_ID']).PR_OWNER_SLACK_ID || 'U010NV4PV29';
   await adapter.setAgentSessionStatus(
     channelType,
     platformId,
@@ -615,8 +612,8 @@ export async function handleReviewerVerdict(payload: ResponsePayload): Promise<b
     return true;
   }
 
-  const ownerSlackId = readEnvFile(['PR_OWNER_SLACK_ID']).PR_OWNER_SLACK_ID || 'U010NV4PV29';
-  if (payload.channelType !== 'slack' || payload.userId !== ownerSlackId) {
+  const ownerSlackId = (process.env.PR_OWNER_SLACK_ID ?? readEnvFile(['PR_OWNER_SLACK_ID']).PR_OWNER_SLACK_ID)?.trim();
+  if (!ownerSlackId || payload.channelType !== 'slack' || payload.userId !== ownerSlackId) {
     log.warn('Ignoring unauthorized reviewer verdict click', {
       questionId: payload.questionId,
       userId: payload.userId,

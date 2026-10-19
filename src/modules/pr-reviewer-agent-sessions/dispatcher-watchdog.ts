@@ -24,7 +24,8 @@ function lastTickAt(): number {
 }
 
 async function alertOwner(silentSince: number): Promise<void> {
-  const dm = readEnvFile(['PR_REVIEWS_DM']).PR_REVIEWS_DM || 'D0B5RV4BH37';
+  const dm = process.env.PR_REVIEWS_DM || readEnvFile(['PR_REVIEWS_DM']).PR_REVIEWS_DM;
+  if (!dm) return;
   const platformId = `slack:${dm}`;
   const mg = getMessagingGroupByPlatform('slack', platformId);
   const adapter = getDeliveryAdapter();
@@ -38,6 +39,7 @@ async function alertOwner(silentSince: number): Promise<void> {
 }
 
 async function check(): Promise<void> {
+  if (!process.env.PR_REVIEWS_DM && !readEnvFile(['PR_REVIEWS_DM']).PR_REVIEWS_DM) return;
   const now = Date.now();
   const silentSince = lastTickAt();
   if (now - silentSince < STALE_AFTER_MS) {

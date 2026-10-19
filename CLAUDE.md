@@ -13,6 +13,12 @@ If you are a fresh install (you ran `git clone`, not `git pull`) and there are n
 
 ---
 
+# PR reviewer fork
+
+For fresh-clone setup requests, follow `docs/pr-reviewer.md` from bootstrap through a disposable test PR. This fork already includes Slack, Codex, and `templates/pr-reviewer`; preserve those payloads rather than reinstalling them from registry branches. Use the colleague's own GitHub and Slack identities, keep secrets in ignored local configuration or OneCLI, and leave automatic dispatch pending until the live validation passes.
+
+Codex and Claude Code share this file through the tracked `AGENTS.md` symlink. Both can guide setup; the interactive bootstrap runs in the operator's terminal. Setup recovery built into the installer invokes Claude Code; a Codex-only session should inspect the same setup logs and resume from the demonstrated failure.
+
 # NanoClaw
 
 Personal AI assistant. See [README.md](README.md) for philosophy and setup. Architecture lives in `docs/`.

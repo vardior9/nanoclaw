@@ -30,7 +30,7 @@ import {
 import { initDb, runMigrations } from '../../src/db/index.js';
 import type { AdditionalMountConfig } from '../../src/container-config.js';
 import { getInstallSlug } from '../../src/install-slug.js';
-import { PROJECT_ROOT, REPOS_ROOT } from './lib.js';
+import { loadConfig, PROJECT_ROOT, REPOS_ROOT } from './lib.js';
 
 function fail(msg: string): never {
   console.error(`pr-reviewer install: ${msg}`);
@@ -187,6 +187,8 @@ function installLaunchdPlist(): string {
 function main(): void {
   const { group } = parseArgs(process.argv.slice(2));
   if (!group) fail('usage: pnpm exec tsx scripts/pr-reviewer/install.ts --group <agent_group_id>');
+  if (process.platform !== 'darwin') fail('the dispatcher installer requires macOS launchd. See docs/pr-reviewer.md.');
+  loadConfig();
 
   ensureReposDir();
   verifyMountAllowlist();

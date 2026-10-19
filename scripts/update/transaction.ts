@@ -128,11 +128,12 @@ function saveState(state: UpdateState): void {
 }
 
 export function loadState(projectRoot: string, id: string): UpdateState {
-  const expectedTransactionRoot = path.join(defaultTransactionsRoot(path.resolve(projectRoot)), id);
+  const resolvedProjectRoot = fs.realpathSync(projectRoot);
+  const expectedTransactionRoot = path.join(defaultTransactionsRoot(resolvedProjectRoot), id);
   const target = statePath(expectedTransactionRoot);
   const state = JSON.parse(fs.readFileSync(target, 'utf8')) as UpdateState;
   if (state.schema !== 'nanoclaw-update/v1') throw new Error(`Unsupported update state in ${target}`);
-  if (!hasSafeStatePaths(state, projectRoot, expectedTransactionRoot, id)) {
+  if (!hasSafeStatePaths(state, resolvedProjectRoot, expectedTransactionRoot, id)) {
     throw new Error('Update state contains mismatched or unsafe paths');
   }
   return state;

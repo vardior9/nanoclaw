@@ -24,6 +24,10 @@ groups/*
 *.keys.json
 .env
 .env*
+!.env.example
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/settings.json
 
 # Temp files
 .tmp-*
@@ -44,13 +48,12 @@ nanoclaw.pid
 .nanoclaw/
 
 agents-sdk-docs
-.agents
-AGENTS.md
 
 # Internal working docs, never committed
 docs/maintainer-guide.md
 docs/drafts/
 forks.md
+decisions.md
 
 # pr-reviewer — per-install bare clones + worktrees (data/pr-reviewer/ state
 # is already covered by the data/ rule above)
