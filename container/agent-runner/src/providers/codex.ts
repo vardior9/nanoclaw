@@ -12,6 +12,7 @@ import type {
   QueryInput,
 } from './types.js';
 import { archiveProviderExchange } from './exchange-archive.js';
+import { resolveCodexAccountId } from './codex-auth.js';
 import {
   type AppServer,
   type CodexMemorySessionHook,
@@ -149,6 +150,7 @@ export class CodexProvider implements AgentProvider {
     const self = this;
 
     async function* gen(): AsyncGenerator<ProviderEvent> {
+      await resolveCodexAccountId();
       self.runtime.writeCodexConfigToml(self.mcpServers, memorySessionHook, {
         model: self.model,
         effort: self.effort,

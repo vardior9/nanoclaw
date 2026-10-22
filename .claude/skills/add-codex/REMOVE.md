@@ -31,6 +31,8 @@ rm -f src/providers/codex.ts \
       src/providers/codex-agents-md.test.ts \
       container/agent-runner/src/providers/codex.ts \
       container/agent-runner/src/providers/codex-app-server.ts \
+      container/agent-runner/src/providers/codex-auth.ts \
+      container/agent-runner/src/providers/codex-auth.test.ts \
       container/agent-runner/src/providers/exchange-archive.ts \
       container/agent-runner/src/providers/exchange-archive.test.ts \
       container/agent-runner/src/providers/codex-registration.test.ts \

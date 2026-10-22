@@ -37,6 +37,8 @@ src/providers/codex-host-contribution.test.ts
 src/providers/codex-agents-md.test.ts
 container/agent-runner/src/providers/codex.ts
 container/agent-runner/src/providers/codex-app-server.ts
+container/agent-runner/src/providers/codex-auth.ts
+container/agent-runner/src/providers/codex-auth.test.ts
 container/agent-runner/src/providers/exchange-archive.ts
 container/agent-runner/src/providers/exchange-archive.test.ts
 container/agent-runner/src/providers/codex-registration.test.ts
@@ -69,10 +71,10 @@ import './codex.js';
 The agent's global Node CLIs install from `container/cli-tools.json` (a json-merge seam), not hand-edited Dockerfile layers. Add Codex by appending one entry — idempotent on `name`, so a re-run is a no-op. `@openai/codex` has no native postinstall, so no `onlyBuilt`. The Dockerfile already installs every manifest entry via pinned `pnpm install -g`; no Dockerfile edit is needed.
 
 ```nc:json-merge into:container/cli-tools.json key:name
-{ "name": "@openai/codex", "version": "0.155.1" }
+{ "name": "@openai/codex", "version": "0.163.0" }
 ```
 
-The version (`0.155.1`) is the canonical pin — this SKILL.md is the source of truth.
+The version (`0.163.0`) is the canonical pin — this SKILL.md is the source of truth.
 
 ### 4. Build
 
