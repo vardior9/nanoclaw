@@ -1,3 +1,4 @@
+import { EventEmitter } from 'events';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock log
@@ -13,8 +14,12 @@ vi.mock('./log.js', () => ({
 
 // Mock child_process — store the mock fn so tests can configure it
 const mockExecSync = vi.fn();
+const mockExecFile = vi.fn();
+const mockSpawn = vi.fn();
 vi.mock('child_process', () => ({
   execSync: (...args: unknown[]) => mockExecSync(...args),
+  execFile: (...args: unknown[]) => mockExecFile(...args),
+  spawn: (...args: unknown[]) => mockSpawn(...args),
 }));
 
 import {
@@ -156,5 +161,67 @@ describe('cleanupOrphans', () => {
       count: 2,
       names: ['nanoclaw-a-1', 'nanoclaw-b-2'],
     });
+  });
+});
+
+describe('missing image recovery', () => {
+  it('shares a failed rebuild, backs off, and notices an externally restored image', async () => {
+    vi.resetModules();
+    const { ensureContainerImage } = await import('./container-runtime.js');
+    const { CONTAINER_IMAGE } = await import('./config.js');
+    let restored = false;
+    let rebuilds = 0;
+    mockExecFile.mockImplementation((binary, args, options, callback) => {
+      callback(restored ? null : new Error('missing image'), '', '');
+    });
+    mockSpawn.mockImplementation(() => {
+      rebuilds++;
+      const build = new EventEmitter();
+      setTimeout(() => build.emit('error', new Error('private build output')), 0);
+      return build;
+    });
+    const attempts = await Promise.allSettled([
+      ensureContainerImage(CONTAINER_IMAGE),
+      ensureContainerImage(CONTAINER_IMAGE),
+    ]);
+    expect(attempts.map((result) => result.status)).toEqual(['rejected', 'rejected']);
+    await expect(ensureContainerImage(CONTAINER_IMAGE)).rejects.toThrow('retry after');
+    expect(rebuilds).toBe(1);
+    const errors = attempts.flatMap((result) => (result.status === 'rejected' ? [result.reason.message] : []));
+    expect(errors).toHaveLength(2);
+    expect(errors.every((message) => message.includes('Agent image recovery failed'))).toBe(true);
+    expect(errors.join(' ')).not.toContain('private build output');
+    restored = true;
+    await expect(ensureContainerImage(CONTAINER_IMAGE)).resolves.toBeUndefined();
+    expect(rebuilds).toBe(1);
+  });
+
+  it('bounds a stuck rebuild and kills only its process group', async () => {
+    vi.resetModules();
+    const { ensureContainerImage } = await import('./container-runtime.js');
+    const { CONTAINER_IMAGE } = await import('./config.js');
+    vi.useFakeTimers();
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+    try {
+      mockExecFile.mockImplementation((binary, args, options, callback) => callback(new Error('missing'), '', ''));
+      mockSpawn.mockReturnValue(Object.assign(new EventEmitter(), { pid: 43210 }));
+      const failure = expect(ensureContainerImage(CONTAINER_IMAGE)).rejects.toThrow('Agent image recovery failed');
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      await failure;
+      expect(kill).toHaveBeenCalledExactlyOnceWith(-43210, 'SIGKILL');
+      await expect(ensureContainerImage(CONTAINER_IMAGE)).rejects.toThrow('retry after');
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+    } finally {
+      kill.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails before launching or rebuilding a missing custom image', async () => {
+    const { ensureContainerImage } = await import('./container-runtime.js');
+    mockExecFile.mockImplementation((binary, args, options, callback) => callback(new Error('missing'), '', ''));
+    await expect(ensureContainerImage('synthetic-reviewer:missing')).rejects.toThrow('Restore this exact image');
+    expect(mockExecFile.mock.calls.every(([binary]) => binary === 'docker')).toBe(true);
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });

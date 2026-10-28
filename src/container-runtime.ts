@@ -2,11 +2,14 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
+import { execFile, execSync, spawn } from 'child_process';
+import path from 'path';
+import { promisify } from 'util';
 import os from 'os';
 
 import { CONTAINER_INSTALL_LABEL } from './config.js';
 import { log } from './log.js';
+import { getDefaultContainerImage } from './install-slug.js';
 
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
@@ -87,4 +90,77 @@ export function cleanupOrphans(): void {
   } catch (err) {
     log.warn('Failed to clean up orphaned containers', { err });
   }
+}
+
+const execFileAsync = promisify(execFile);
+const imageChecks = new Map<string, Promise<void>>();
+const imageRetryAfter = new Map<string, number>();
+const IMAGE_RECOVERY_BACKOFF_MS = 15 * 60 * 1000;
+
+export function ensureContainerImage(image: string): Promise<void> {
+  const existing = imageChecks.get(image);
+  if (existing) return existing;
+  const inspect = () =>
+    execFileAsync(CONTAINER_RUNTIME_BIN, ['image', 'inspect', image, '--format', '{{.Id}}'], { timeout: 10000 });
+  const check = (async () => {
+    try {
+      await inspect();
+      imageRetryAfter.delete(image);
+      return;
+    } catch {
+      if (image !== getDefaultContainerImage(process.cwd())) {
+        throw new Error(
+          `Agent image unavailable: ${image}. Restore this exact image before retrying; queues are preserved.`,
+        );
+      }
+    }
+    const retryAfter = imageRetryAfter.get(image) ?? 0;
+    if (Date.now() < retryAfter) {
+      throw new Error(
+        `Agent image unavailable: ${image}; retry after ${new Date(retryAfter).toISOString()}. Run ./container/build.sh to restore it now; queues are preserved.`,
+      );
+    }
+    imageRetryAfter.set(image, Date.now() + IMAGE_RECOVERY_BACKOFF_MS);
+    log.warn('Agent image unavailable; recovering through container/build.sh', { image });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const build = spawn('bash', [path.resolve('container/build.sh')], {
+          cwd: process.cwd(),
+          detached: true,
+          stdio: 'ignore',
+        });
+        const timeout = setTimeout(
+          () => {
+            if (build.pid) {
+              try {
+                process.kill(-build.pid, 'SIGKILL');
+              } catch {}
+            }
+            reject(new Error('Agent image build timed out'));
+          },
+          20 * 60 * 1000,
+        );
+        build.once('error', () => {
+          clearTimeout(timeout);
+          reject(new Error('Agent image build could not start'));
+        });
+        build.once('exit', (code) => {
+          clearTimeout(timeout);
+          if (code === 0) resolve();
+          else reject(new Error('Agent image build failed'));
+        });
+      });
+      await inspect();
+      imageRetryAfter.delete(image);
+      log.info('Agent image recovered', { image });
+    } catch {
+      const retryAt = Date.now() + IMAGE_RECOVERY_BACKOFF_MS;
+      imageRetryAfter.set(image, retryAt);
+      throw new Error(
+        `Agent image recovery failed: ${image}; retry after ${new Date(retryAt).toISOString()}. Check Docker and run ./container/build.sh; queues are preserved.`,
+      );
+    }
+  })().finally(() => imageChecks.delete(image));
+  imageChecks.set(image, check);
+  return check;
 }
