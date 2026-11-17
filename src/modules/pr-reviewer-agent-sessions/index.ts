@@ -382,6 +382,15 @@ export async function deliverPendingReviewerAgentSession(
 ): Promise<{ handled: false } | { handled: true; platformMessageId?: string }> {
   const key = prKeyFromPendingThread(session.thread_id);
   if (!key) return { handled: false };
+  const signal = verdictSignal(msg.content);
+  if (signal?.recommendation === 'REQUEST_CHANGES') {
+    log.info('Reviewer REQUEST_CHANGES recommendation suppressed from Slack', {
+      sessionId: session.id,
+      key,
+      headSha: signal.headSha,
+    });
+    return { handled: true };
+  }
   const ownerSlackId = (process.env.PR_OWNER_SLACK_ID ?? readEnvFile(['PR_OWNER_SLACK_ID']).PR_OWNER_SLACK_ID)?.trim();
   if (!ownerSlackId) throw new Error('PR_OWNER_SLACK_ID is required for reviewer delivery. See docs/pr-reviewer.md.');
   if (!adapter.setAgentSessionStatus) throw new Error('Slack adapter has no native agent-session lifecycle');
@@ -394,7 +403,6 @@ export async function deliverPendingReviewerAgentSession(
   const platformId = mg.platform_id;
   let alias = aliasForSession(session.id);
   let platformMessageId: string | undefined;
-  const signal = verdictSignal(msg.content);
   const prepared = signal ? prepareVerdictRequest(session, key, msg, signal) : null;
   const questionId = prepared?.questionId ?? null;
   const deliveredKind = signal ? 'chat-sdk' : msg.kind;
@@ -607,7 +615,7 @@ async function redeliverVerdictCard(request: VerdictRequestRow): Promise<void> {
 export async function handleReviewerVerdict(payload: ResponsePayload): Promise<boolean> {
   const request = verdictRequest(payload.questionId);
   if (!request) return false;
-  if (request.closed_at || request.terminal_reason) {
+  if (request.closed_at || request.terminal_reason || request.recommendation === 'REQUEST_CHANGES') {
     log.info('Ignoring expired reviewer verdict click', { questionId: payload.questionId, pr: request.pr_key });
     return true;
   }

@@ -422,7 +422,7 @@ export function hasPendingExactHeadVerdict(prKey: string, headSha: string): bool
           `SELECT 1
              FROM reviewer_verdict_requests v
              JOIN reviewer_agent_session_aliases a ON a.session_id = v.session_id
-            WHERE v.pr_key = ? AND v.head_sha = ?
+            WHERE v.pr_key = ? AND v.head_sha = ? AND v.recommendation = 'APPROVE'
               AND v.terminal_reason IS NULL AND a.closed_at IS NULL
             LIMIT 1`,
         )

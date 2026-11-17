@@ -51,7 +51,7 @@ Diff: <files> files, +<additions>/−<deletions>
 </message>
 ```
 
-`recommendation` may instead be `REQUEST_CHANGES`. Do not emit a second signal for the same head and actionable state. The marker is intercepted and rendered as a Slack card; users never type a verdict, and the model never receives the click.
+`recommendation` may instead be `REQUEST_CHANGES`. Do not emit a second signal for the same head and actionable state. The host consumes `REQUEST_CHANGES` silently, leaving inline findings on GitHub and the PR tracked for re-review. Only `APPROVE` is rendered as a Slack card; users never type a verdict, and the model never receives the click.
 
 ## Failures and memory
 

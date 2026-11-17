@@ -173,6 +173,29 @@ describe('reviewer action-only agent sessions', () => {
     });
   });
 
+  it('consumes REQUEST_CHANGES without Slack delivery, a verdict request, or closing tracking', async () => {
+    const { adapter } = fakeAdapter();
+
+    await expect(
+      deliverPendingReviewerAgentSession(
+        {
+          ...msg,
+          content: JSON.stringify({
+            text: 'PR_REVIEW_VERDICT {"recommendation":"REQUEST_CHANGES","head_sha":"0123456789abcdef0123456789abcdef01234567"}\nReady for final verdict',
+          }),
+        },
+        session,
+        adapter,
+      ),
+    ).resolves.toEqual({ handled: true });
+
+    expect(adapter.deliver).not.toHaveBeenCalled();
+    expect(adapter.setAgentSessionStatus).not.toHaveBeenCalled();
+    expect(getDb().prepare('SELECT * FROM reviewer_verdict_requests').all()).toEqual([]);
+    expect(getDb().prepare('SELECT * FROM reviewer_agent_session_aliases').all()).toEqual([]);
+    expect(getDb().prepare('SELECT status FROM sessions WHERE id = ?').get(session.id)).toEqual({ status: 'active' });
+  });
+
   it('turns a structured recommendation into a host-owned Slack card', async () => {
     const { adapter } = fakeAdapter();
     const signal = {

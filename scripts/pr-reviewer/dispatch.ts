@@ -42,6 +42,7 @@ import {
   latestReviewRequest,
   reviewerTeams,
   reviewerWakeReason,
+  hasPendingExactHeadVerdict,
   latestSelfReviewState,
   loadConfig,
   loadState,
@@ -181,7 +182,7 @@ async function handleReviewRerequest(
   ctx: TickCtx,
 ): Promise<void> {
   const { owner, repo } = ref;
-  const wakeId = reviewerWakeId('review_request', key, reviewRequestId ?? pr.updated_at);
+  const wakeId = reviewerWakeId('review_request', key, `${reviewRequestId ?? pr.updated_at}:${pr.head.sha}`);
   if (ctx.availableWakeSlots <= 0) {
     console.log(`[pr-reviewer] ${key}: deferring wake (review capacity full)`);
     return;
@@ -229,7 +230,7 @@ async function handleReviewRerequest(
   if (ctx.args.dryRun) return;
   ctx.state[key] = {
     ...known,
-    review_requested: true,
+    review_requested: isReviewRequested(ref.owner, pr, ctx.reviewer),
     last_review_request_id: reviewRequestId,
     head_sha: pr.head.sha,
     last_observed_head_sha: pr.head.sha,
@@ -244,6 +245,7 @@ async function handleReviewRerequest(
 /** Overdue-verdict reminder. Plain Slack post only — no model involvement. */
 async function maybeRemind(key: string, ref: PrRef, pr: PrDetail, known: PrState, ctx: TickCtx): Promise<void> {
   if (known.nudges >= ctx.cfg.maxNudges) return;
+  if (!hasPendingExactHeadVerdict(key, pr.head.sha)) return;
 
   const native = known.thread_ts.startsWith(`slack:${ctx.cfg.reviewsDm}:pending-pr-`)
     ? materializedAgentSession(known.thread_ts)
@@ -376,7 +378,7 @@ async function processPr(key: string, isDiscovered: boolean, ctx: TickCtx): Prom
     },
     { reviewRequested: stillRequested, reviewRequestId, headSha: pr.head.sha, updatedAt: pr.updated_at },
   );
-  if (wakeReason === 'review_rerequested') {
+  if (wakeReason === 'review_rerequested' || pr.head.sha !== known.head_sha) {
     await handleReviewRerequest(key, ref, pr, known, reviewRequestId, ctx);
     return;
   }
