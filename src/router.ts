@@ -522,7 +522,8 @@ async function deliverToAgent(
   // A reviewer PR can exist internally before Slack has a visible session.
   // Once its first actionable output materializes a real DM thread, route
   // replies through that persisted alias into the original isolated context.
-  const { findReviewerSessionByAlias } = await import('./modules/pr-reviewer-agent-sessions/index.js');
+  const { findReviewerSessionByAlias, prepareReviewerOwnerReply } =
+    await import('./modules/pr-reviewer-agent-sessions/index.js');
   const aliased = findReviewerSessionByAlias(agent.agent_group_id, mg.id, effectiveThreadId);
   const { session, created } = aliased
     ? { session: aliased, created: false }
@@ -572,6 +573,7 @@ async function deliverToAgent(
   }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
+  const ownerReply = wake && aliased ? await prepareReviewerOwnerReply(aliased, event, userId) : undefined;
   writeSessionMessage(session.agent_group_id, session.id, {
     id: messageId,
     kind: event.message.kind,
@@ -579,7 +581,7 @@ async function deliverToAgent(
     platformId: deliveryAddr.platformId,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
-    content: event.message.content,
+    content: ownerReply ?? event.message.content,
     trigger: wake ? 1 : 0,
   });
 

@@ -53,6 +53,7 @@ export interface InboundEvent {
     id: string;
     kind: 'chat' | 'chat-sdk';
     content: string; // JSON blob
+    rawText?: string;
     timestamp: string;
     /**
      * Platform-confirmed bot-mention signal forwarded from the adapter.
@@ -70,6 +71,7 @@ export interface InboundMessage {
   id: string;
   kind: 'chat' | 'chat-sdk';
   content: unknown; // JS object — host will JSON.stringify before writing to session DB
+  rawText?: string;
   timestamp: string;
   /**
    * Platform-confirmed signal that this message is a mention of the bot.

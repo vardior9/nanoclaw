@@ -553,8 +553,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // Slack agent view attaches the user's current app context directly to
     // message.im. Chat SDK 4.29 keeps it only in raw, so project the ordered
     // entities before raw is intentionally discarded below.
-    if (message.raw) {
-      const raw = message.raw as Record<string, unknown>;
+    const raw = message.raw as Record<string, unknown> | undefined;
+    if (raw) {
       const appContext = raw.app_context as { entities?: unknown[] } | undefined;
       if (Array.isArray(appContext?.entities)) {
         serialized.app_context = {
@@ -581,6 +581,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       id: message.id,
       kind: 'chat-sdk',
       content: serialized,
+      rawText: adapter.name === 'slack' && typeof raw?.text === 'string' ? raw.text : undefined,
       timestamp: message.metadata.dateSent.toISOString(),
       isMention,
       isGroup,

@@ -6,6 +6,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const SCRIPT = path.resolve('templates/pr-reviewer/skills/pr-worktree/bin/worktree.sh');
+const OWNER_REPLY = path.resolve('scripts/pr-reviewer/owner-reply.ts');
 const SKILL = path.resolve('templates/pr-reviewer/skills/pr-worktree/SKILL.md');
 
 let root: string;
@@ -17,7 +18,7 @@ beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-worktree-'));
   bin = path.join(root, 'bin');
   seed = path.join(root, 'seed');
-  bare = path.join(root, 'acme__widgets', 'git');
+  bare = path.join(root, 'repos', 'acme__widgets', 'git');
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, 'flock'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   fs.mkdirSync(path.dirname(bare), { recursive: true });
@@ -47,7 +48,7 @@ function commit(contents: string): string {
 function checkout(): string {
   return execFileSync('bash', [SCRIPT, 'acme/widgets', '7'], {
     encoding: 'utf8',
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, REPOS_ROOT: root },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, REPOS_ROOT: path.join(root, 'repos') },
   });
 }
 
@@ -67,8 +68,40 @@ describe('PR reviewer worktree helper', () => {
     fs.writeFileSync(path.join(admin, 'index.lock'), '');
 
     const output = checkout();
-    expect(output).toContain(`WT=${path.join(root, 'acme__widgets', 'wt', 'pr-7')}`);
+    expect(output).toContain(`WT=${path.join(root, 'repos', 'acme__widgets', 'wt', 'pr-7')}`);
     expect(run(['--git-dir', admin, 'rev-parse', 'HEAD'])).toBe(next);
     expect(fs.existsSync(path.join(admin, 'index.lock'))).toBe(false);
+  });
+
+  it('prepares an owner reply with the current GitHub head and delta from the previous review', () => {
+    const previous = run(['-C', seed, 'rev-parse', 'HEAD']);
+    const current = commit('two');
+    run(['-C', seed, 'update-ref', 'refs/pull/7/head', current]);
+    run(['-C', seed, 'update-ref', 'refs/heads/base', previous]);
+    run(['-C', bare, 'remote', 'add', 'origin', seed]);
+
+    const stateDir = path.join(root, 'data', 'pr-reviewer');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, 'state.json'), JSON.stringify({ 'acme/widgets#7': { head_sha: previous } }));
+    fs.symlinkSync(path.resolve('node_modules'), path.join(root, 'node_modules'), 'dir');
+    const detail = JSON.stringify({ number: 7, head: { sha: current }, base: { ref: 'base' } });
+    fs.writeFileSync(
+      path.join(bin, 'gh'),
+      `#!/bin/sh\ncase "$2" in\nrepos/acme/widgets/pulls/7) printf '%s' '${detail}' ;;\ngraphql) printf '%s' '{}' ;;\n*) exit 1 ;;\nesac\n`,
+      { mode: 0o755 },
+    );
+
+    const output = execFileSync(process.execPath, ['--import', 'tsx', OWNER_REPLY, 'acme/widgets#7', 'owner_reply:7'], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PR_SELF_LOGIN: 'reviewer' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const { headSha, text } = JSON.parse(output);
+    expect(headSha).toBe(current);
+    expect(text).toContain(`head sha: ${current}`);
+    expect(text).toContain(`Previous reviewed head: ${previous}`);
+    expect(text).toContain('M\tfile.txt');
+    expect(run(['-C', bare, 'rev-parse', 'refs/pr/7/head'])).toBe(current);
   });
 });

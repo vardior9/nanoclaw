@@ -99,6 +99,7 @@ async function main(): Promise<void> {
             id: message.id,
             kind: message.kind,
             content: JSON.stringify(message.content),
+            rawText: message.rawText,
             timestamp: message.timestamp,
             isMention: message.isMention,
             isGroup: message.isGroup,

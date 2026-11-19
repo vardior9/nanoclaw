@@ -607,6 +607,7 @@ export function fetchPrRefs(
   number: number,
   baseRef: string,
   dryRun: boolean,
+  expectedHead?: string,
 ): { ok: true } | { ok: false; error: string } {
   const { bare } = repoPaths(owner, repo);
   if (dryRun) {
@@ -622,7 +623,14 @@ export function fetchPrRefs(
     `+refs/pull/${number}/head:refs/pr/${number}/head`,
     `+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`,
   ]);
-  if (!res.ok) return { ok: false, error: res.error };
+  if (!res.ok) return res;
+  if (expectedHead) {
+    const head = runGit(['-C', bare, 'rev-parse', `refs/pr/${number}/head`]);
+    if (!head.ok) return head;
+    if (head.stdout.trim() !== expectedHead) {
+      return { ok: false, error: 'PR head changed between reading GitHub metadata and fetching refs' };
+    }
+  }
   return { ok: true };
 }
 

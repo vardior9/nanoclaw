@@ -42,20 +42,60 @@ export function formatReReviewMessage(
   unresolvedContext: string,
   wakeId: string,
 ): string {
+  return formatContinuation(
+    `Review re-requested on ${owner}/${repo}#${pr.number} — head is now ${pr.head.sha}.`,
+    owner,
+    repo,
+    pr,
+    deltaContext,
+    unresolvedContext,
+    wakeId,
+  );
+}
+
+export function formatOwnerReplyMessage(
+  owner: string,
+  repo: string,
+  pr: PrDetail,
+  deltaContext: string | null,
+  unresolvedContext: string,
+  wakeId: string,
+): string {
+  return [
+    formatContinuation('Owner reply for this PR.', owner, repo, pr, deltaContext, unresolvedContext, wakeId),
+    'Use pr-review to continue the outstanding review at the exact host head above. The owner’s instruction answers any scope question it addresses, so apply that scope without asking again.',
+    'Use the initial-review workflow for review work still outstanding. Use the re-review workflow to reconcile prior findings against any supplied delta and unresolved threads.',
+    '',
+    'Owner’s instruction for this PR:',
+  ].join('\n');
+}
+
+function formatContinuation(
+  event: string,
+  owner: string,
+  repo: string,
+  pr: PrDetail,
+  deltaContext: string | null,
+  unresolvedContext: string,
+  wakeId: string,
+): string {
   return [
     `Reviewer wake id: ${wakeId}`,
-    `Review re-requested on ${owner}/${repo}#${pr.number} — head is now ${pr.head.sha}.`,
+    event,
+    `owner/repo: ${owner}/${repo}`,
+    `PR number: ${pr.number}`,
+    `head sha: ${pr.head.sha}`,
     `Refresh the existing worktree locally at ${containerWorktreePath(owner, repo, pr.number)} from the host-prepared bare clone ${containerBarePath(owner, repo)}; never fetch or merge.`,
     `base ref: ${pr.base.ref}`,
     `PR description (claims to verify): ${pr.body ?? '(no description)'}`,
     REPOSITORY_METHOD_GATE,
     '',
     'This is a fresh model thread. The host-calculated continuation context below is authoritative; do not search old model transcripts.',
-    '',
-    deltaContext,
+    ...(deltaContext === null ? [] : ['', deltaContext]),
     '',
     'Unresolved review threads opened by this reviewer:',
     unresolvedContext,
+    '',
     SLACK_NOTIFICATION_GATE,
   ].join('\n');
 }

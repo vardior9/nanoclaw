@@ -12,10 +12,11 @@ import { execFile } from 'child_process';
 import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { promisify } from 'util';
 
 import type Database from 'better-sqlite3';
 
-import type { AgentSessionStatus } from '../../channels/adapter.js';
+import type { AgentSessionStatus, InboundEvent } from '../../channels/adapter.js';
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
 import { setAgentSessionStoppedHandler } from '../../channels/chat-sdk-bridge.js';
 import { registerQuestionRenderResolver } from '../../channels/question-render-registry.js';
@@ -373,6 +374,38 @@ export function findReviewerSessionByAlias(
           AND s.status = 'active'`,
     )
     .get(aliasThreadId, agentGroupId, messagingGroupId) as Session | undefined;
+}
+
+export async function prepareReviewerOwnerReply(
+  session: Session,
+  event: InboundEvent,
+  userId: string | null,
+): Promise<string | undefined> {
+  const key = prKeyFromPendingThread(session.thread_id);
+  if (event.channelType !== 'slack' || !key) return;
+  const ownerSlackId = (process.env.PR_OWNER_SLACK_ID ?? readEnvFile(['PR_OWNER_SLACK_ID']).PR_OWNER_SLACK_ID)?.trim();
+  if (!ownerSlackId || userId !== `slack:${ownerSlackId}`) return;
+  const content = JSON.parse(event.message.content);
+  const reply = event.message.rawText ?? content.text;
+  if (typeof reply !== 'string' || !reply.trim()) return;
+
+  const wakeId = `owner_reply:${key}:${event.message.id}`;
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    ['--import', 'tsx', 'scripts/pr-reviewer/owner-reply.ts', key, wakeId],
+    {
+      env: { ...process.env, PATH: [process.env.PATH, '/opt/homebrew/bin'].filter(Boolean).join(path.delimiter) },
+      timeout: 60_000,
+      maxBuffer: 8 * 1024 * 1024,
+    },
+  );
+  if (!stdout) return;
+  const { headSha, text } = JSON.parse(stdout);
+  if (typeof headSha !== 'string' || !/^[0-9a-f]{40}$/.test(headSha) || typeof text !== 'string' || !text) {
+    throw new Error('Invalid reviewer owner-reply wake');
+  }
+  log.info('Prepared reviewer owner-reply wake', { sessionId: session.id, key, headSha, wakeId });
+  return JSON.stringify({ ...content, text: `${text}\n${reply}` });
 }
 
 export async function deliverPendingReviewerAgentSession(
