@@ -1,1 +1,2 @@
 Disposable fixture for PR Event Streams.
+Second commit for the head-changed signal.
