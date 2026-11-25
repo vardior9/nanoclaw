@@ -16,7 +16,7 @@
  *   3. Merge the repos/ RW mount into the group's container_configs row.
  *   4. Render and write the launchd plist to ~/Library/LaunchAgents/.
  */
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -158,35 +158,71 @@ function installReviewerRuntime(groupId: string): void {
   console.log(`configured group ${groupId} for fresh, focused reviewer turns`);
 }
 
+function dispatcherRuntime(): { args: string[]; envPath: string } {
+  const node = getNodePath();
+  return {
+    args: [
+      node,
+      path.join(PROJECT_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
+      path.join(PROJECT_ROOT, 'scripts', 'pr-reviewer', 'dispatch.ts'),
+    ],
+    envPath: `${path.dirname(node)}:/opt/homebrew/bin:${os.homedir()}/.local/bin:/usr/local/bin:/usr/bin:/bin`,
+  };
+}
+
+function installedDispatcherRuntime(plistPath: string): ReturnType<typeof dispatcherRuntime> {
+  if (!fs.existsSync(plistPath)) fail(`install the dispatcher first (missing ${plistPath})`);
+  const plist = JSON.parse(
+    execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', plistPath], { encoding: 'utf8' }),
+  );
+  const args: unknown = plist.ProgramArguments;
+  const envPath: unknown = plist.EnvironmentVariables?.PATH;
+  if (
+    !Array.isArray(args) ||
+    !args.length ||
+    !args.every((arg) => typeof arg === 'string') ||
+    typeof envPath !== 'string' ||
+    !envPath
+  ) {
+    fail(`expected ProgramArguments and EnvironmentVariables.PATH in ${plistPath}`);
+  }
+  return { args, envPath };
+}
+
+function escapePlistString(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
 function installLaunchdPlist(follow: boolean): string {
   const job = follow ? 'pr-events' : 'pr-dispatch';
-  const label = `com.nanoclaw.${job}.${getInstallSlug(PROJECT_ROOT)}`;
+  const slug = getInstallSlug(PROJECT_ROOT);
+  const label = `com.nanoclaw.${job}.${slug}`;
+  const launchAgents = path.join(os.homedir(), 'Library', 'LaunchAgents');
+  const { args, envPath } = follow
+    ? installedDispatcherRuntime(path.join(launchAgents, `com.nanoclaw.pr-dispatch.${slug}.plist`))
+    : dispatcherRuntime();
+  const programArguments = (follow ? [...args, '--follow'] : args)
+    .map((arg) => `<string>${escapePlistString(arg)}</string>`)
+    .join('\n        ');
   const templatePath = path.join(PROJECT_ROOT, 'launchd', 'com.nanoclaw.pr-dispatch.plist.template');
   const template = fs.readFileSync(templatePath, 'utf-8');
 
   const logDir = path.join(PROJECT_ROOT, 'logs');
   fs.mkdirSync(logDir, { recursive: true });
   const logPath = path.join(logDir, `${job}.log`);
-  const nodePath = getNodePath();
-  const tsxArgs = follow
-    ? '<string>--import</string>\n        <string>tsx</string>'
-    : `<string>${path.join(PROJECT_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs')}</string>`;
 
   const rendered = template
     .replaceAll('{{LABEL}}', label)
-    .replaceAll('{{NODE_PATH}}', nodePath)
-    .replaceAll('{{NODE_BIN_DIR}}', path.dirname(nodePath))
-    .replaceAll('{{FOLLOW_ARGUMENT}}', follow ? '\n        <string>--follow</string>' : '')
+    .replaceAll('{{PROGRAM_ARGUMENTS}}', () => programArguments)
     .replaceAll('{{SCHEDULE}}', follow
       ? '<key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>300</integer>'
       : '<key>StartInterval</key><integer>300</integer>')
-    .replaceAll('{{TSX_ARGUMENTS}}', tsxArgs)
-    .replaceAll('{{DISPATCH_SCRIPT_PATH}}', path.join(PROJECT_ROOT, 'scripts', 'pr-reviewer', 'dispatch.ts'))
     .replaceAll('{{PROJECT_ROOT}}', PROJECT_ROOT)
+    .replaceAll('{{PATH}}', () => escapePlistString(envPath))
     .replaceAll('{{HOME}}', os.homedir())
     .replaceAll('{{LOG_PATH}}', logPath);
 
-  const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
+  const plistPath = path.join(launchAgents, `${label}.plist`);
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
   fs.writeFileSync(plistPath, rendered);
   console.log(`wrote ${plistPath}`);
