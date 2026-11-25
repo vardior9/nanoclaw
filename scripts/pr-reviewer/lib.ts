@@ -207,13 +207,14 @@ export function reviewerWakeReason(
   return previous.reviewRequestId !== current.reviewRequestId ? 'review_rerequested' : null;
 }
 
-export function loadState(): StateFile {
+export function loadState(strict = false): StateFile {
   try {
     const raw = fs.readFileSync(STATE_PATH, 'utf-8');
     return JSON.parse(raw) as StateFile;
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
     if (e.code !== 'ENOENT') {
+      if (strict) throw err;
       console.error(`[pr-reviewer] state file unreadable, starting empty: ${String(err)}`);
     }
     return {};

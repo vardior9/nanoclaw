@@ -16,6 +16,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { followPullEvents } from './events.js';
 import { formatKickoffMessage, formatReReviewMessage } from './prompts.js';
 
 import {
@@ -64,6 +65,7 @@ import {
 interface Args {
   dryRun: boolean;
   once: string | null;
+  event?: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -320,6 +322,9 @@ async function processPr(key: string, isDiscovered: boolean, ctx: TickCtx): Prom
     return; // keep state as-is, retry next tick
   }
   const pr = detail.data;
+  if (ctx.args.event) {
+    console.log(`[pr-reviewer-events] ${new Date().toISOString()} read ${key} ${ctx.args.event} head=${pr.head.sha} state=${pr.state}`);
+  }
   const stillRequested = isReviewRequested(ref.owner, pr, ctx.reviewer);
   const isClosed = pr.state === 'closed';
 
@@ -464,6 +469,7 @@ function gcWorktrees(cfg: Config, dryRun: boolean): void {
 
 async function tick(cfg: Config, args: Args): Promise<void> {
   const state = loadState();
+  if (args.event && args.once && !Object.hasOwn(state, args.once)) return;
 
   let outstandingReviews: number;
   try {
@@ -510,7 +516,7 @@ async function tick(cfg: Config, args: Args): Promise<void> {
 
   for (const key of keys) {
     try {
-      await processPr(key, discoveredKeys.has(key) || Boolean(args.once), ctx);
+      await processPr(key, !args.event && discoveredKeys.has(key), ctx);
     } catch (err) {
       // One PR's failure must never abort the tick for the others.
       console.error(`[pr-reviewer] unhandled error processing ${key}`, err);
@@ -527,8 +533,25 @@ async function tick(cfg: Config, args: Args): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const args = parseArgs(argv);
   const cfg = loadConfig();
+  if (argv.includes('--follow')) {
+    if (args.dryRun || argv.includes('--once')) throw new Error('--follow cannot be combined with --dry-run or --once');
+    const stop = new AbortController();
+    process.once('SIGTERM', () => stop.abort());
+    process.once('SIGINT', () => stop.abort());
+    await followPullEvents(async (key, event) => {
+      if (!acquireLock()) return false;
+      try {
+        await tick(cfg, { once: key, event, dryRun: false });
+        return true;
+      } finally {
+        releaseLock();
+      }
+    }, stop.signal);
+    return;
+  }
 
   if (!acquireLock()) {
     // Overlapping launchd tick — exit quietly, the running tick owns this pass.

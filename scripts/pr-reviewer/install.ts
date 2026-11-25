@@ -158,20 +158,29 @@ function installReviewerRuntime(groupId: string): void {
   console.log(`configured group ${groupId} for fresh, focused reviewer turns`);
 }
 
-function installLaunchdPlist(): string {
-  const label = `com.nanoclaw.pr-dispatch.${getInstallSlug(PROJECT_ROOT)}`;
+function installLaunchdPlist(follow: boolean): string {
+  const job = follow ? 'pr-events' : 'pr-dispatch';
+  const label = `com.nanoclaw.${job}.${getInstallSlug(PROJECT_ROOT)}`;
   const templatePath = path.join(PROJECT_ROOT, 'launchd', 'com.nanoclaw.pr-dispatch.plist.template');
   const template = fs.readFileSync(templatePath, 'utf-8');
 
   const logDir = path.join(PROJECT_ROOT, 'logs');
   fs.mkdirSync(logDir, { recursive: true });
-  const logPath = path.join(logDir, 'pr-dispatch.log');
+  const logPath = path.join(logDir, `${job}.log`);
+  const nodePath = getNodePath();
+  const tsxArgs = follow
+    ? '<string>--import</string>\n        <string>tsx</string>'
+    : `<string>${path.join(PROJECT_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs')}</string>`;
 
   const rendered = template
     .replaceAll('{{LABEL}}', label)
-    .replaceAll('{{NODE_PATH}}', getNodePath())
-    .replaceAll('{{NODE_BIN_DIR}}', path.dirname(getNodePath()))
-    .replaceAll('{{TSX_CLI_PATH}}', path.join(PROJECT_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'))
+    .replaceAll('{{NODE_PATH}}', nodePath)
+    .replaceAll('{{NODE_BIN_DIR}}', path.dirname(nodePath))
+    .replaceAll('{{FOLLOW_ARGUMENT}}', follow ? '\n        <string>--follow</string>' : '')
+    .replaceAll('{{SCHEDULE}}', follow
+      ? '<key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>300</integer>'
+      : '<key>StartInterval</key><integer>300</integer>')
+    .replaceAll('{{TSX_ARGUMENTS}}', tsxArgs)
     .replaceAll('{{DISPATCH_SCRIPT_PATH}}', path.join(PROJECT_ROOT, 'scripts', 'pr-reviewer', 'dispatch.ts'))
     .replaceAll('{{PROJECT_ROOT}}', PROJECT_ROOT)
     .replaceAll('{{HOME}}', os.homedir())
@@ -185,18 +194,24 @@ function installLaunchdPlist(): string {
 }
 
 function main(): void {
-  const { group } = parseArgs(process.argv.slice(2));
-  if (!group) fail('usage: pnpm exec tsx scripts/pr-reviewer/install.ts --group <agent_group_id>');
+  const argv = process.argv.slice(2);
+  const follow = argv.includes('--events');
+  const { group } = parseArgs(argv);
+  if (follow === Boolean(group)) {
+    fail('usage: pnpm exec tsx scripts/pr-reviewer/install.ts (--group <agent_group_id> | --events)');
+  }
   if (process.platform !== 'darwin') fail('the dispatcher installer requires macOS launchd. See docs/pr-reviewer.md.');
   loadConfig();
 
-  ensureReposDir();
-  verifyMountAllowlist();
-  installReviewerRuntime(group!);
-  const plistPath = installLaunchdPlist();
+  if (group) {
+    ensureReposDir();
+    verifyMountAllowlist();
+    installReviewerRuntime(group);
+  }
+  const plistPath = installLaunchdPlist(follow);
 
   const uid = typeof process.getuid === 'function' ? process.getuid() : '$(id -u)';
-  console.log('\nInstall complete. To load the dispatcher (not run automatically):');
+  console.log('\nInstall complete. To load the job:');
   console.log(`  launchctl bootstrap gui/${uid} ${plistPath}`);
 }
 
